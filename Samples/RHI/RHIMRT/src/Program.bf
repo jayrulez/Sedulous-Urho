@@ -43,7 +43,7 @@ struct LightParams
 
 /// Demonstrates multiple render targets (MRT) for deferred rendering.
 /// Press 1-4 to switch display modes: 1=Lit, 2=Albedo, 3=Normals, 4=Position
-class MRTSample : RHISampleApp
+class MRTSample : SampleApp
 {
 	// Per-frame tracking for G-buffer command buffers
 	private const int GBUFFER_BUFFER_COUNT = 3;

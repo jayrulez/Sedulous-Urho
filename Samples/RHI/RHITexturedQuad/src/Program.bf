@@ -28,7 +28,7 @@ struct Uniforms
 }
 
 /// Rotating textured quad sample using the RHI sample framework.
-class TexturedQuadSample : RHISampleApp
+class TexturedQuadSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IBuffer mIndexBuffer;

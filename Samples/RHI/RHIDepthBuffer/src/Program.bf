@@ -28,7 +28,7 @@ struct Uniforms
 }
 
 /// Demonstrates depth buffer functionality by rendering overlapping quads.
-class DepthBufferSample : RHISampleApp
+class DepthBufferSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IBuffer mIndexBuffer;

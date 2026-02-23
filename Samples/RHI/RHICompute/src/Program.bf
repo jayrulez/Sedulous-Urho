@@ -36,7 +36,7 @@ struct Vertex
 }
 
 /// Demonstrates compute shaders for GPU particle simulation.
-class ComputeSample : RHISampleApp
+class ComputeSample : SampleApp
 {
 	private const int PARTICLE_COUNT = 256;
 	// Need 3 frames of command buffers since OnUpdate runs before AcquireNextImage

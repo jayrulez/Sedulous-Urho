@@ -32,7 +32,7 @@ struct Uniforms
 /// Demonstrates mipmap levels and GPU mipmap generation.
 /// Use arrow keys to move the quad closer/further to see mip level changes.
 /// Press M to toggle between manual colored mips (visualization) and GPU-generated mips.
-class MipmapSample : RHISampleApp
+class MipmapSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IBuffer mIndexBuffer;

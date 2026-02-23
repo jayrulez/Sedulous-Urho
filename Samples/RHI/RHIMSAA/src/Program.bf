@@ -30,7 +30,7 @@ struct Uniforms
 /// MSAA sample - demonstrates multisampled rendering and ResolveTexture.
 /// Renders a rotating triangle to a 4x MSAA texture, then resolves to display.
 /// Press SPACE to toggle between MSAA (smooth edges) and no MSAA (aliased).
-class MSAASample : RHISampleApp
+class MSAASample : SampleApp
 {
 	private const uint32 MSAA_SAMPLES = 4;
 

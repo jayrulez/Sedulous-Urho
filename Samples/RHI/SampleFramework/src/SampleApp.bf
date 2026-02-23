@@ -53,7 +53,7 @@ struct SampleConfig
 /// **Important**: Do NOT write to per-frame GPU buffers in OnUpdate().
 /// Use OnPrepareFrame() for all buffer writes, as it's called after the fence wait.
 ///
-abstract class RHISampleApp
+abstract class SampleApp
 {
 	// Core objects
 	protected SDL3Shell mShell;

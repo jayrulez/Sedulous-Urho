@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Imaging" = "*", "Sedulous.RHI" = "*", SampleFramework = "*", "Sedulous.Drawing" = "*", "Sedulous.Fonts" = "*", "Sedulous.GUI" = "*", "Sedulous.GUI.Shell" = "*", "Sedulous.Drawing.Fonts" = "*", "Sedulous.Drawing.Renderer" = "*", "Sedulous.Shell" = "*", "Sedulous.Shell.SDL3" = "*", "Sedulous.Shaders" = "*", corlib = "*"}
+
+[Project]
+Name = "GUISandbox"
+StartupObject = "GUISandbox.Program"

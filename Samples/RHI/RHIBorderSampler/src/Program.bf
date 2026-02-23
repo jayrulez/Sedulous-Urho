@@ -9,7 +9,7 @@ using SampleFramework;
 /// Border sampler sample - demonstrates SamplerBorderColor with ClampToBorder.
 /// Shows a checkerboard texture with extended UV coordinates.
 /// Press 1-3 to switch between border colors: TransparentBlack, OpaqueBlack, OpaqueWhite.
-class BorderSamplerSample : RHISampleApp
+class BorderSamplerSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private ITexture mTexture;

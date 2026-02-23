@@ -36,7 +36,7 @@ struct InstanceData
 }
 
 /// Demonstrates instanced rendering with many small triangles.
-class InstancingSample : RHISampleApp
+class InstancingSample : SampleApp
 {
 	private const int INSTANCE_COUNT = 100;
 	private const int GRID_SIZE = 10;

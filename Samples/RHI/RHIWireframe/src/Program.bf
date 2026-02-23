@@ -29,7 +29,7 @@ struct Uniforms
 
 /// Wireframe rendering sample - demonstrates FillMode.Wireframe
 /// Press SPACE to toggle between solid and wireframe rendering.
-class WireframeSample : RHISampleApp
+class WireframeSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IBuffer mIndexBuffer;

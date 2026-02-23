@@ -27,7 +27,7 @@ struct Uniforms
 }
 
 /// Rotating triangle sample using the RHI sample framework.
-class TriangleSample : RHISampleApp
+class TriangleSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IBuffer mUniformBuffer;

@@ -23,7 +23,7 @@ struct Vertex
 /// Sample demonstrating buffer and texture readback functionality.
 /// Press R to read back the vertex buffer and verify data.
 /// Press T to read back the test texture and verify pixel data.
-class ReadbackSample : RHISampleApp
+class ReadbackSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IShaderModule mVertShader;

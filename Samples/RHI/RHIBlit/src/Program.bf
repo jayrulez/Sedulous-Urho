@@ -16,7 +16,7 @@ struct QuadUniforms
 /// Blit sample - demonstrates the Blit() command for texture scaling.
 /// Renders a rotating pattern to a small texture, then blits it to a larger texture.
 /// Shows both the original (small) and blitted (scaled up) textures side by side.
-class BlitSample : RHISampleApp
+class BlitSample : SampleApp
 {
 	private const uint32 SMALL_SIZE = 64;
 	private const uint32 LARGE_SIZE = 256;

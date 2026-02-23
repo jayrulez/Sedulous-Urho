@@ -27,7 +27,7 @@ struct Vertex
 /// Press T to toggle timestamp query display
 /// Press O to toggle occlusion query display
 /// Press Space to toggle visibility of the occluded quad
-class QueriesSample : RHISampleApp
+class QueriesSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IBuffer mOccludedVertexBuffer;

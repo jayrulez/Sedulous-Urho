@@ -21,7 +21,7 @@ struct Vertex
 }
 
 /// Demonstrates alpha blending with overlapping transparent quads.
-class BlendingSample : RHISampleApp
+class BlendingSample : SampleApp
 {
 	private IBuffer mVertexBuffer;
 	private IBuffer mIndexBuffer;

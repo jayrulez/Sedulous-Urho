@@ -38,7 +38,7 @@ struct ObjectUniforms
 /// Demonstrates multiple bind groups and dynamic uniform buffer offsets.
 /// - Set 0: Global per-frame data (time)
 /// - Set 1: Per-object data using dynamic offset
-class BindGroupsSample : RHISampleApp
+class BindGroupsSample : SampleApp
 {
 	private const int OBJECT_COUNT = 9;  // 3x3 grid
 	private const uint32 OBJECT_UNIFORM_SIZE = 256;  // Aligned size for dynamic offset
