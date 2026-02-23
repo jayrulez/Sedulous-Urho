@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Jobs" = "*", "Sedulous.OpenDDL" = "*", "Sedulous.Resources" = "*", "Sedulous.Serialization" = "*", "Sedulous.Serialization.OpenDDL" = "*", corlib = "*"}
+
+[Project]
+Name = "Sedulous.Resources.Tests"
+TargetType = "BeefTest"

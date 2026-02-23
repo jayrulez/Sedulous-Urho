@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.RHI" = "*", SampleFramework = "*"}
+
+[Project]
+Name = "RHIMRT"
+StartupObject = "RHIMRT.Program"

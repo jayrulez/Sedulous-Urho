@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Foundation" = "*", "Sedulous.Engine.Core" = "*", recastnavigation-Beef = "*"}
+
+[Project]
+Name = "Sedulous.Engine.Navigation"
+TargetType = "BeefLib"

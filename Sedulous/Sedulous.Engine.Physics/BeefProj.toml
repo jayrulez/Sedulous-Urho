@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Foundation" = "*", "Sedulous.Engine.Core" = "*", joltc-Beef = "*"}
+
+[Project]
+Name = "Sedulous.Engine.Physics"
+TargetType = "BeefLib"

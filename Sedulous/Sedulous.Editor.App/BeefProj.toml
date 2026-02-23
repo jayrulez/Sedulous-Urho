@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Foundation" = "*", "Sedulous.Editor.Core" = "*", "Sedulous.Engine.Core" = "*", "Sedulous.Engine.App" = "*", "Sedulous.Shell" = "*", "Sedulous.GUI" = "*"}
+
+[Project]
+Name = "Sedulous.Editor.App"
+StartupObject = "Sedulous.Editor.App.Program"

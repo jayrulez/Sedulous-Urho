@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Foundation" = "*", "Sedulous.Engine.Core" = "*", "Sedulous.RHI" = "*", "Sedulous.Shaders" = "*", "Sedulous.Models" = "*", "Sedulous.Imaging" = "*"}
+
+[Project]
+Name = "Sedulous.Engine.Renderer"
+TargetType = "BeefLib"

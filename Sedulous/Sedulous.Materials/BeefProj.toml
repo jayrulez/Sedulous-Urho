@@ -1,0 +1,7 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.RHI" = "*", "Sedulous.Shaders" = "*", corlib = "*", "Sedulous.Resources" = "*", "Sedulous.Serialization.OpenDDL" = "*"}
+
+[Project]
+Name = "Sedulous.Materials"
+TargetType = "BeefLib"
+StartupObject = "Sedulous.Materials.Program"

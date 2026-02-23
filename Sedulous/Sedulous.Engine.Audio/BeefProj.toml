@@ -1,0 +1,13 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Foundation" = "*", "Sedulous.Engine.Core" = "*", SDL3 = "*", dr_libs-Beef = "*", stb_vorbis-Beef = "*", "Sedulous.Resources" = "*"}
+
+[Project]
+Name = "Sedulous.Engine.Audio"
+
+[[ProjectFolder.Items]]
+Type = "AutoFolder"
+Name = "Tests"
+
+[[ProjectFolder.Items.Items]]
+Type = "IgnoreSource"
+Name = "AudioClipResourceTests.bf"

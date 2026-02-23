@@ -1,0 +1,6 @@
+FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.RHI" = "*", SampleFramework = "*"}
+
+[Project]
+Name = "RHIQueries"
+StartupObject = "RHIQueries.Program"
