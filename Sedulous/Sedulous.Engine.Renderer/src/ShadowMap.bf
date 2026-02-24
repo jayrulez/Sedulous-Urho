@@ -33,7 +33,7 @@ public class ShadowMap
 	private IDevice mDevice;
 	private ITexture mAtlasTexture ~ { if (_ != null) delete _; };
 	private ITextureView mAtlasView ~ { if (_ != null) delete _; };
-	private ITextureView mAtlasDepthView ~ { if (_ != null) delete _; };
+	private ITextureView mAtlasDepthView; // Alias for mAtlasView — not separately owned
 	private uint32 mAtlasSize;
 	private List<ShadowCascade> mCascades = new .() ~ delete _;
 
@@ -65,8 +65,8 @@ public class ShadowMap
 	/// Creates the shadow atlas depth texture.
 	public Result<void> CreateAtlas()
 	{
-		// Clean up old atlas
-		if (mAtlasDepthView != null) { delete mAtlasDepthView; mAtlasDepthView = null; }
+		// Clean up old atlas (mAtlasDepthView is an alias, not separately owned)
+		mAtlasDepthView = null;
 		if (mAtlasView != null) { delete mAtlasView; mAtlasView = null; }
 		if (mAtlasTexture != null) { delete mAtlasTexture; mAtlasTexture = null; }
 
