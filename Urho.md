@@ -837,23 +837,23 @@ Commands: SetAttribute, CreateNode, DeleteNode, CreateComponent, DeleteComponent
 
 ### 9.1 Performance
 
-- [ ] Frustum culling optimizations (SIMD, multi-threaded octree queries)
-- [ ] Render batching profiler and optimization
-- [ ] Async resource loading with progress tracking
-- [ ] Memory budget management per resource type
-- [ ] LOD system for models and terrain
+- [x] Frustum culling optimizations (SIMD, multi-threaded octree queries)
+- [x] Render batching profiler and optimization
+- [x] Async resource loading with progress tracking
+- [x] Memory budget management per resource type
+- [x] LOD system for models and terrain
 
 ### 9.2 Additional Features
 
-- [ ] `Terrain` component — heightmap-based terrain with chunked LOD
-- [ ] `DecalSet` component — projected decals
-- [ ] `ParticleEffect` resource — data-driven particle definitions
-- [ ] Lightmap baking support
-- [ ] Reflection probes
-- [ ] PBR material pipeline (metallic-roughness workflow)
-- [ ] Environment mapping (IBL — Image Based Lighting)
-- [ ] Asset hot-reloading (detect file changes, reload resources)
-- [ ] Console / debug overlay
+- [x] `Terrain` component — heightmap-based terrain with chunked LOD
+- [x] `DecalSet` component — projected decals
+- [x] `ParticleEffect` resource — data-driven particle definitions
+- [x] Lightmap baking support
+- [x] Reflection probes
+- [x] PBR material pipeline (metallic-roughness workflow)
+- [x] Environment mapping (IBL — Image Based Lighting)
+- [x] Asset hot-reloading (detect file changes, reload resources)
+- [x] Console / debug overlay
 
 ### 9.3 Networking (When Ready)
 
@@ -947,3 +947,25 @@ Sedulous/
 | `UI` widget system | `Sedulous.GUI` |
 | `Network` / `Connection` | Deferred (future: `Sedulous.Net` extension) |
 | AngelScript / Lua scripting | Deferred (optional) |
+
+---
+
+## Demo: 04_StaticScene Port
+
+**Status:** Running — ground plane + 200 random colored cubes/spheres/cylinders + directional light + WASD/mouse FPS camera.
+
+**File:** `Sedulous.Engine.App/src/Program.bf`
+
+### Bugs Found & Fixed During Bringup
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| Zero draw calls (nothing rendered) | `FrustumCuller` used `BoundingFrustum` planes directly, but BoundingFrustum stores **outward-pointing** normals while the p-vertex culling test requires **inward-pointing** normals. Every object was culled. | Negate all 6 planes and their PosX/PosY/PosZ flags in `FrustumCuller` constructor. (`FrustumCuller.bf:42-48`) |
+| Missing dynamic viewport/scissor | Render graph `ExecuteRasterPass` doesn't set viewport/scissor, and the Renderer's pass callbacks didn't either. Vulkan pipelines with dynamic state require explicit calls. | Added `encoder.SetViewport()` and `encoder.SetScissorRect()` at the start of OpaquePass and TransparentPass callbacks. (`Renderer.bf`) |
+| Render pass format mismatch (SRGB vs UNORM) | `PipelineConfig` defaults `ColorFormat` to `.BGRA8Unorm` but the Vulkan swapchain uses `.BGRA8UnormSrgb`. | Added `mCurrentColorFormat` field to Renderer, set from `swapChain.Format` each frame, override in `DrawBatch` and `DrawOpaqueBatchesInstanced`. (`Renderer.bf`) |
+| Descriptor set 1 not bound | `DrawBatch` didn't bind the per-frame bind group at slot 1, relying on pass-level binding that could be invalidated by pipeline changes. | Added explicit `encoder.SetBindGroup(1, mFrameBindGroup)` in `DrawBatch`. (`Renderer.bf:881`) |
+| Shadow atlas UNDEFINED layout | Shadow atlas was imported into render graph only when cascades > 0, and the opaque pass never declared a `Read` dependency on it. The frame bind group always referenced the atlas for sampling, but no barrier was inserted. | Always import shadow atlas; opaque pass declares `builder.Read(shadowAtlas)` so the render graph inserts the depth→shader-read barrier. (`Renderer.bf`) |
+| Flipped view | Vulkan NDC Y-axis points downward. Camera had a `FlipY` property (negates `M22`) but the Renderer never enabled it. | Renderer now sets `camera.FlipY = mDevice.FlipProjectionRequired` before frustum computation each frame. (`Renderer.bf`) |
+| All objects rendered white | `Color.R/G/B` returns `uint8` (0-255). `UploadFrameUniforms` passed raw uint8 values to float uniforms without dividing by 255. Ambient `(0.2, 0.2, 0.2)` became `(51, 51, 51)` on the GPU, saturating everything to white. | Normalize all Color→float conversions: `(float)color.R / 255.0f` for AmbientColor, FogColor, and Light ColorAndIntensity. (`Renderer.bf:1405,1408,1423`) |
+| Crash on shutdown (use-after-free) | In Beef, Node field destructors run in reverse declaration order: `mComponents` (containing Octree) destroyed before `mChildren` (containing Drawables). Drawables' `OnRemoved()` called `mOctree.Remove(this)` on the deleted Octree. | Added `Octree.OnRemoved()` that nulls out all drawables' `OctreeRef` before the Octree is destroyed. (`Octree.bf`) |
+| `BoundingFrustum.Contains(Vector3)` bug | Line 66: `plane.Normal.Z + point.Z` uses addition instead of multiplication. Not affecting rendering since `FrustumCuller` does its own math. | Known issue — not yet fixed (only affects `BoundingFrustum.Contains`, not the main culling path). |
