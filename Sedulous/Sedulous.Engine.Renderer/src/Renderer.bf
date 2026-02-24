@@ -52,23 +52,26 @@ public class Renderer
 	private PipelineStateCache mPipelineCache ~ { if (_ != null) delete _; };
 
 	// Per-frame uniform buffer (view/projection/camera/lights/fog) — slot 1
-	private IBuffer mFrameUniformBuffer ~ { if (_ != null) delete _; };
+	// Multi-buffered to avoid GPU/CPU contention across frames in flight.
+	private IBuffer[MAX_FRAMES_IN_FLIGHT] mFrameUniformBuffers;
 	private IBindGroupLayout mFrameBindGroupLayout ~ { if (_ != null) delete _; };
-	private IBindGroup mFrameBindGroup ~ { if (_ != null) delete _; };
+	private IBindGroup[MAX_FRAMES_IN_FLIGHT] mFrameBindGroups;
 
 	// Per-object dynamic uniform buffer (world transform) — slot 2
-	private IBuffer mObjectUniformBuffer ~ { if (_ != null) delete _; };
+	// Multi-buffered to avoid GPU/CPU contention across frames in flight.
+	private IBuffer[MAX_FRAMES_IN_FLIGHT] mObjectUniformBuffers;
 	private IBindGroupLayout mObjectBindGroupLayout ~ { if (_ != null) delete _; };
-	private IBindGroup mObjectBindGroup ~ { if (_ != null) delete _; };
+	private IBindGroup[MAX_FRAMES_IN_FLIGHT] mObjectBindGroups;
 
 	// Shadow mapping
 	private ShadowMap mShadowMap ~ { if (_ != null) delete _; };
 	private ISampler mShadowSampler ~ { if (_ != null) delete _; };
 
 	// Shadow pass uniform buffer and bind group (per-cascade dynamic offsets)
-	private IBuffer mShadowFrameBuffer ~ { if (_ != null) delete _; };
+	// Multi-buffered to avoid GPU/CPU contention across frames in flight.
+	private IBuffer[MAX_FRAMES_IN_FLIGHT] mShadowFrameBuffers;
 	private IBindGroupLayout mShadowFrameBindGroupLayout ~ { if (_ != null) delete _; };
-	private IBindGroup mShadowFrameBindGroup ~ { if (_ != null) delete _; };
+	private IBindGroup[MAX_FRAMES_IN_FLIGHT] mShadowFrameBindGroups;
 
 	// Empty bind group for shadow pass slot 0 (no material bindings)
 	private IBindGroupLayout mEmptyBindGroupLayout ~ { if (_ != null) delete _; };
@@ -92,9 +95,9 @@ public class Renderer
 	// Asset hot-reloading
 	private FileWatcher mFileWatcher ~ { if (_ != null) delete _; };
 
-	// GPU instancing
-	private IBuffer mInstanceBuffer ~ { if (_ != null) delete _; };
-	private int32 mInstanceBufferCapacity = 0;
+	// GPU instancing (multi-buffered)
+	private IBuffer[MAX_FRAMES_IN_FLIGHT] mInstanceBuffers;
+	private int32[MAX_FRAMES_IN_FLIGHT] mInstanceBufferCapacities;
 	private const int32 MAX_INSTANCES_PER_DRAW = 256;
 	private const int32 INSTANCE_STRIDE = 64; // 4 x float4 = world matrix
 
@@ -109,6 +112,7 @@ public class Renderer
 	private TextureFormat mCurrentColorFormat = .BGRA8UnormSrgb;
 
 	// Frame tracking
+	private int32 mCurrentFrameIndex = 0;
 	private uint64 mFrameNumber = 0;
 	private uint64 mLastUpdateFrame = 0;
 	private float mTotalTime = 0;
@@ -209,7 +213,7 @@ public class Renderer
 		if (mDevice != null)
 			mDevice.WaitIdle();
 
-		// Clean up in-flight command buffers
+		// Clean up in-flight command buffers and per-frame GPU resources
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 		{
 			if (mCommandBuffers[i] != null)
@@ -217,6 +221,13 @@ public class Renderer
 				delete mCommandBuffers[i];
 				mCommandBuffers[i] = null;
 			}
+			if (mFrameUniformBuffers[i] != null) { delete mFrameUniformBuffers[i]; mFrameUniformBuffers[i] = null; }
+			if (mFrameBindGroups[i] != null) { delete mFrameBindGroups[i]; mFrameBindGroups[i] = null; }
+			if (mObjectUniformBuffers[i] != null) { delete mObjectUniformBuffers[i]; mObjectUniformBuffers[i] = null; }
+			if (mObjectBindGroups[i] != null) { delete mObjectBindGroups[i]; mObjectBindGroups[i] = null; }
+			if (mShadowFrameBuffers[i] != null) { delete mShadowFrameBuffers[i]; mShadowFrameBuffers[i] = null; }
+			if (mShadowFrameBindGroups[i] != null) { delete mShadowFrameBindGroups[i]; mShadowFrameBindGroups[i] = null; }
+			if (mInstanceBuffers[i] != null) { delete mInstanceBuffers[i]; mInstanceBuffers[i] = null; }
 		}
 
 		mViewports.Clear();
@@ -466,6 +477,7 @@ public class Renderer
 		if (mLastUpdateFrame != mFrameNumber)
 			return;
 
+		mCurrentFrameIndex = (int32)(mFrameNumber % MAX_FRAMES_IN_FLIGHT);
 		mResourcePool.BeginFrame();
 
 		for (let viewport in mViewports)
@@ -493,6 +505,7 @@ public class Renderer
 			return;
 
 		let frameIndex = (int)swapChain.CurrentFrameIndex;
+		mCurrentFrameIndex = (int32)frameIndex;
 
 		// Delete previous command buffer for this frame slot (GPU is done with it after fence wait)
 		if (mCommandBuffers[frameIndex] != null)
@@ -696,10 +709,10 @@ public class Renderer
 						encoder.SetScissorRect((int32)(cascadeWidth * (float)c), 0, (uint32)cascadeWidth, atlasSize);
 
 						// Bind shadow frame uniforms with dynamic offset for this cascade's VP matrix
-						if (mShadowFrameBindGroup != null)
+						if (mShadowFrameBindGroups[mCurrentFrameIndex] != null)
 						{
 							uint32[1] dynOff = .((uint32)(c * SHADOW_FRAME_ALIGN));
-							encoder.SetBindGroup(1, mShadowFrameBindGroup, Span<uint32>(&dynOff[0], 1));
+							encoder.SetBindGroup(1, mShadowFrameBindGroups[mCurrentFrameIndex], Span<uint32>(&dynOff[0], 1));
 						}
 
 						// Draw all opaque shadow casters, selecting the correct shadow pipeline per vertex layout
@@ -750,8 +763,8 @@ public class Renderer
 				encoder.SetScissorRect(0, 0, (uint32)vpWidth, (uint32)vpHeight);
 
 				// Bind per-frame uniforms once for the pass
-				if (mFrameBindGroup != null)
-					encoder.SetBindGroup(1, mFrameBindGroup);
+				if (mFrameBindGroups[mCurrentFrameIndex] != null)
+					encoder.SetBindGroup(1, mFrameBindGroups[mCurrentFrameIndex]);
 
 				// Draw opaque batches with GPU instancing where possible
 				DrawOpaqueBatchesInstanced(encoder);
@@ -761,8 +774,8 @@ public class Renderer
 				{
 					encoder.SetPipeline(mSkyboxPipeline);
 					encoder.SetBindGroup(0, skybox.BindGroup);
-					if (mFrameBindGroup != null)
-						encoder.SetBindGroup(1, mFrameBindGroup);
+					if (mFrameBindGroups[mCurrentFrameIndex] != null)
+						encoder.SetBindGroup(1, mFrameBindGroups[mCurrentFrameIndex]);
 					encoder.SetVertexBuffer(0, skybox.VertexBuffer);
 					encoder.SetIndexBuffer(skybox.IndexBuffer, .UInt16);
 					encoder.DrawIndexed(36, 1, 0, 0, 0);
@@ -773,8 +786,8 @@ public class Renderer
 				{
 					if (mEmptyBindGroup != null)
 						encoder.SetBindGroup(0, mEmptyBindGroup);
-					if (mFrameBindGroup != null)
-						encoder.SetBindGroup(1, mFrameBindGroup);
+					if (mFrameBindGroups[mCurrentFrameIndex] != null)
+						encoder.SetBindGroup(1, mFrameBindGroups[mCurrentFrameIndex]);
 					debugRenderer.RenderDepthLines(encoder);
 				}
 			}
@@ -793,8 +806,8 @@ public class Renderer
 				encoder.SetScissorRect(0, 0, (uint32)vpWidth, (uint32)vpHeight);
 
 				// Bind per-frame uniforms once for the pass
-				if (mFrameBindGroup != null)
-					encoder.SetBindGroup(1, mFrameBindGroup);
+				if (mFrameBindGroups[mCurrentFrameIndex] != null)
+					encoder.SetBindGroup(1, mFrameBindGroups[mCurrentFrameIndex]);
 
 				// Draw transparent batches back-to-front
 				int32 idx = (int32)mOpaqueBatches.Count;
@@ -809,8 +822,8 @@ public class Renderer
 				{
 					if (mEmptyBindGroup != null)
 						encoder.SetBindGroup(0, mEmptyBindGroup);
-					if (mFrameBindGroup != null)
-						encoder.SetBindGroup(1, mFrameBindGroup);
+					if (mFrameBindGroups[mCurrentFrameIndex] != null)
+						encoder.SetBindGroup(1, mFrameBindGroups[mCurrentFrameIndex]);
 					debugRenderer.RenderNoDepthLines(encoder);
 				}
 			}
@@ -899,14 +912,14 @@ public class Renderer
 		}
 
 		// Bind per-frame uniforms at slot 1
-		if (mFrameBindGroup != null)
-			encoder.SetBindGroup(1, mFrameBindGroup);
+		if (mFrameBindGroups[mCurrentFrameIndex] != null)
+			encoder.SetBindGroup(1, mFrameBindGroups[mCurrentFrameIndex]);
 
 		// Bind per-object uniforms at slot 2 with dynamic offset
-		if (mObjectBindGroup != null)
+		if (mObjectBindGroups[mCurrentFrameIndex] != null)
 		{
 			uint32[1] dynamicOffsets = .((uint32)(objectIndex * RenderConstants.OBJECT_UNIFORM_ALIGN));
-			encoder.SetBindGroup(2, mObjectBindGroup, Span<uint32>(&dynamicOffsets[0], 1));
+			encoder.SetBindGroup(2, mObjectBindGroups[mCurrentFrameIndex], Span<uint32>(&dynamicOffsets[0], 1));
 		}
 
 		// Bind bone matrices at slot 3 for skinned meshes
@@ -940,10 +953,10 @@ public class Renderer
 			return;
 
 		// Bind per-object uniforms at slot 2 with dynamic offset
-		if (mObjectBindGroup != null)
+		if (mObjectBindGroups[mCurrentFrameIndex] != null)
 		{
 			uint32[1] dynamicOffsets = .((uint32)(objectIndex * RenderConstants.OBJECT_UNIFORM_ALIGN));
-			encoder.SetBindGroup(2, mObjectBindGroup, Span<uint32>(&dynamicOffsets[0], 1));
+			encoder.SetBindGroup(2, mObjectBindGroups[mCurrentFrameIndex], Span<uint32>(&dynamicOffsets[0], 1));
 		}
 
 		encoder.SetVertexBuffer(0, batch.VertexBuffer);
@@ -987,21 +1000,22 @@ public class Renderer
 	/// Ensures the instance buffer can hold at least the given number of instances.
 	private void EnsureInstanceBuffer(int32 instanceCount)
 	{
-		if (mInstanceBuffer != null && mInstanceBufferCapacity >= instanceCount)
+		let fi = mCurrentFrameIndex;
+		if (mInstanceBuffers[fi] != null && mInstanceBufferCapacities[fi] >= instanceCount)
 			return;
 
-		if (mInstanceBuffer != null)
+		if (mInstanceBuffers[fi] != null)
 		{
-			delete mInstanceBuffer;
-			mInstanceBuffer = null;
+			delete mInstanceBuffers[fi];
+			mInstanceBuffers[fi] = null;
 		}
 
 		let size = (uint64)(instanceCount * INSTANCE_STRIDE);
 		BufferDescriptor desc = .(size, .Vertex | .CopyDst);
 		if (mDevice.CreateBuffer(&desc) case .Ok(let buf))
 		{
-			mInstanceBuffer = buf;
-			mInstanceBufferCapacity = instanceCount;
+			mInstanceBuffers[fi] = buf;
+			mInstanceBufferCapacities[fi] = instanceCount;
 		}
 	}
 
@@ -1059,7 +1073,7 @@ public class Renderer
 
 			let count = Math.Min((int32)batchIndices.Count, MAX_INSTANCES_PER_DRAW);
 			EnsureInstanceBuffer(count);
-			if (mInstanceBuffer == null)
+			if (mInstanceBuffers[mCurrentFrameIndex] == null)
 			{
 				// Fallback to individual draws
 				for (let idx in batchIndices)
@@ -1072,7 +1086,7 @@ public class Renderer
 			Matrix* matrices = (Matrix*)scope uint8[count * INSTANCE_STRIDE]* (?);
 			for (int32 j = 0; j < count; j++)
 				matrices[j] = mOpaqueBatches[batchIndices[j]].WorldTransform;
-			mDevice.Queue.WriteBuffer(mInstanceBuffer, 0, Span<uint8>((uint8*)matrices, (int)uploadSize));
+			mDevice.Queue.WriteBuffer(mInstanceBuffers[mCurrentFrameIndex], 0, Span<uint8>((uint8*)matrices, (int)uploadSize));
 
 			// Set up instanced pipeline
 			let firstBatch = mOpaqueBatches[batchIndices[0]];
@@ -1100,20 +1114,20 @@ public class Renderer
 			}
 
 			// Bind frame uniforms
-			if (mFrameBindGroup != null)
-				encoder.SetBindGroup(1, mFrameBindGroup);
+			if (mFrameBindGroups[mCurrentFrameIndex] != null)
+				encoder.SetBindGroup(1, mFrameBindGroups[mCurrentFrameIndex]);
 
 			// Bind per-object uniforms (slot 2 still needed for pipeline layout compatibility,
 			// but INSTANCED shader doesn't read from it)
-			if (mObjectBindGroup != null)
+			if (mObjectBindGroups[mCurrentFrameIndex] != null)
 			{
 				uint32[1] dynamicOffsets = .(0);
-				encoder.SetBindGroup(2, mObjectBindGroup, Span<uint32>(&dynamicOffsets[0], 1));
+				encoder.SetBindGroup(2, mObjectBindGroups[mCurrentFrameIndex], Span<uint32>(&dynamicOffsets[0], 1));
 			}
 
 			// Bind vertex buffer (slot 0) and instance buffer (slot 1)
 			encoder.SetVertexBuffer(0, firstBatch.VertexBuffer);
-			encoder.SetVertexBuffer(1, mInstanceBuffer);
+			encoder.SetVertexBuffer(1, mInstanceBuffers[mCurrentFrameIndex]);
 			encoder.SetIndexBuffer(firstBatch.IndexBuffer, firstBatch.IndexBufferFormat);
 			encoder.DrawIndexed((uint32)firstBatch.IndexCount, (uint32)count, (uint32)firstBatch.StartIndex, 0, 0);
 			mStatDrawCalls++;
@@ -1256,76 +1270,44 @@ public class Renderer
 	// ===== Private: Uniform Buffer Management =====
 
 	/// Creates per-frame and per-object uniform buffers, layouts, and bind groups.
+	/// All dynamic buffers are multi-buffered (MAX_FRAMES_IN_FLIGHT copies) to
+	/// avoid GPU/CPU contention when the CPU writes next frame's data while the
+	/// GPU is still reading the previous frame's data.
 	private bool CreateUniformBuffers()
 	{
-		// --- Per-frame uniform buffer (800 bytes) ---
-		var frameBufDesc = BufferDescriptor(RenderConstants.FRAME_UNIFORM_SIZE, .Uniform | .CopyDst);
-		if (mDevice.CreateBuffer(&frameBufDesc) case .Ok(let buf))
-			mFrameUniformBuffer = buf;
-		else
-			return false;
-
-		// Per-frame bind group layout: uniform buffer + shadow atlas texture + comparison sampler
-		var compSamplerEntry = BindGroupLayoutEntry();
-		compSamplerEntry.Binding = 0;
-		compSamplerEntry.Visibility = .Fragment;
-		compSamplerEntry.Type = .ComparisonSampler;
-
-		BindGroupLayoutEntry[3] frameLayoutEntries = .(
-			.UniformBuffer(0, .Vertex | .Fragment),
-			.SampledTexture(0, .Fragment),
-			compSamplerEntry
-		);
-		var frameLayoutDesc = BindGroupLayoutDescriptor(frameLayoutEntries);
-		if (mDevice.CreateBindGroupLayout(&frameLayoutDesc) case .Ok(let layout))
-			mFrameBindGroupLayout = layout;
-		else
-			return false;
-
-		// Per-frame bind group (includes shadow atlas if available)
+		// --- Per-frame bind group layout (shared across all frame copies) ---
 		let shadowAtlasView = (mShadowMap != null) ? mShadowMap.AtlasDepthView : null;
-		if (shadowAtlasView != null && mShadowSampler != null)
+		bool hasShadowAtlas = shadowAtlasView != null && mShadowSampler != null;
+
+		if (hasShadowAtlas)
 		{
-			BindGroupEntry[3] frameEntries = .(
-				.Buffer(0, mFrameUniformBuffer, 0, RenderConstants.FRAME_UNIFORM_SIZE),
-				.Texture(0, shadowAtlasView, .ShaderReadOnly),
-				.Sampler(0, mShadowSampler)
+			var compSamplerEntry = BindGroupLayoutEntry();
+			compSamplerEntry.Binding = 0;
+			compSamplerEntry.Visibility = .Fragment;
+			compSamplerEntry.Type = .ComparisonSampler;
+
+			BindGroupLayoutEntry[3] frameLayoutEntries = .(
+				.UniformBuffer(0, .Vertex | .Fragment),
+				.SampledTexture(0, .Fragment),
+				compSamplerEntry
 			);
-			var frameBgDesc = BindGroupDescriptor(mFrameBindGroupLayout, frameEntries);
-			if (mDevice.CreateBindGroup(&frameBgDesc) case .Ok(let bg))
-				mFrameBindGroup = bg;
+			var frameLayoutDesc = BindGroupLayoutDescriptor(frameLayoutEntries);
+			if (mDevice.CreateBindGroupLayout(&frameLayoutDesc) case .Ok(let layout))
+				mFrameBindGroupLayout = layout;
 			else
 				return false;
 		}
 		else
 		{
-			// Fallback: no shadow atlas available (just uniform buffer)
-			// Create a minimal layout and bind group without shadow textures
-			if (mFrameBindGroupLayout != null) { delete mFrameBindGroupLayout; mFrameBindGroupLayout = null; }
 			BindGroupLayoutEntry[1] minLayoutEntries = .(.UniformBuffer(0, .Vertex | .Fragment));
 			var minLayoutDesc = BindGroupLayoutDescriptor(minLayoutEntries);
 			if (mDevice.CreateBindGroupLayout(&minLayoutDesc) case .Ok(let minLayout))
 				mFrameBindGroupLayout = minLayout;
 			else
 				return false;
-
-			BindGroupEntry[1] frameEntries = .(.Buffer(0, mFrameUniformBuffer, 0, RenderConstants.FRAME_UNIFORM_SIZE));
-			var frameBgDesc = BindGroupDescriptor(mFrameBindGroupLayout, frameEntries);
-			if (mDevice.CreateBindGroup(&frameBgDesc) case .Ok(let bg))
-				mFrameBindGroup = bg;
-			else
-				return false;
 		}
 
-		// --- Per-object dynamic uniform buffer ---
-		let objectBufSize = (uint64)(RenderConstants.MAX_OBJECTS_PER_FRAME * RenderConstants.OBJECT_UNIFORM_ALIGN);
-		var objectBufDesc = BufferDescriptor(objectBufSize, .Uniform | .CopyDst);
-		if (mDevice.CreateBuffer(&objectBufDesc) case .Ok(let objBuf))
-			mObjectUniformBuffer = objBuf;
-		else
-			return false;
-
-		// Per-object bind group layout: one uniform buffer at binding 0 (vertex only), with dynamic offset
+		// --- Per-object bind group layout (shared) ---
 		BindGroupLayoutEntry[1] objectLayoutEntries = .(.UniformBuffer(0, .Vertex, true));
 		var objectLayoutDesc = BindGroupLayoutDescriptor(objectLayoutEntries);
 		if (mDevice.CreateBindGroupLayout(&objectLayoutDesc) case .Ok(let objLayout))
@@ -1333,23 +1315,7 @@ public class Renderer
 		else
 			return false;
 
-		// Per-object bind group (dynamic — offset provided at bind time)
-		BindGroupEntry[1] objectEntries = .(.Buffer(0, mObjectUniformBuffer, 0, RenderConstants.OBJECT_UNIFORM_SIZE));
-		var objectBgDesc = BindGroupDescriptor(mObjectBindGroupLayout, objectEntries);
-		if (mDevice.CreateBindGroup(&objectBgDesc) case .Ok(let objBg))
-			mObjectBindGroup = objBg;
-		else
-			return false;
-
-		// --- Shadow pass dynamic uniform buffer (one slot per cascade, 1024-byte aligned) ---
-		let shadowBufSize = (uint64)(RenderConstants.MAX_SHADOW_CASCADES * SHADOW_FRAME_ALIGN);
-		var shadowBufDesc = BufferDescriptor(shadowBufSize, .Uniform | .CopyDst);
-		if (mDevice.CreateBuffer(&shadowBufDesc) case .Ok(let shadowBuf))
-			mShadowFrameBuffer = shadowBuf;
-		else
-			return false;
-
-		// Shadow frame bind group layout: single dynamic uniform buffer
+		// --- Shadow frame bind group layout (shared) ---
 		BindGroupLayoutEntry[1] shadowLayoutEntries = .(.UniformBuffer(0, .Vertex, true));
 		var shadowLayoutDesc = BindGroupLayoutDescriptor(shadowLayoutEntries);
 		if (mDevice.CreateBindGroupLayout(&shadowLayoutDesc) case .Ok(let shadowLayout))
@@ -1357,13 +1323,73 @@ public class Renderer
 		else
 			return false;
 
-		// Shadow frame bind group
-		BindGroupEntry[1] shadowEntries = .(.Buffer(0, mShadowFrameBuffer, 0, RenderConstants.FRAME_UNIFORM_SIZE));
-		var shadowBgDesc = BindGroupDescriptor(mShadowFrameBindGroupLayout, shadowEntries);
-		if (mDevice.CreateBindGroup(&shadowBgDesc) case .Ok(let shadowBg))
-			mShadowFrameBindGroup = shadowBg;
-		else
-			return false;
+		// --- Create N copies of each buffer + bind group ---
+		let objectBufSize = (uint64)(RenderConstants.MAX_OBJECTS_PER_FRAME * RenderConstants.OBJECT_UNIFORM_ALIGN);
+		let shadowBufSize = (uint64)(RenderConstants.MAX_SHADOW_CASCADES * SHADOW_FRAME_ALIGN);
+
+		for (int fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++)
+		{
+			// Per-frame uniform buffer
+			var frameBufDesc = BufferDescriptor(RenderConstants.FRAME_UNIFORM_SIZE, .Uniform | .CopyDst);
+			if (mDevice.CreateBuffer(&frameBufDesc) case .Ok(let frameBuf))
+				mFrameUniformBuffers[fi] = frameBuf;
+			else
+				return false;
+
+			// Per-frame bind group
+			if (hasShadowAtlas)
+			{
+				BindGroupEntry[3] frameEntries = .(
+					.Buffer(0, mFrameUniformBuffers[fi], 0, RenderConstants.FRAME_UNIFORM_SIZE),
+					.Texture(0, shadowAtlasView, .ShaderReadOnly),
+					.Sampler(0, mShadowSampler)
+				);
+				var frameBgDesc = BindGroupDescriptor(mFrameBindGroupLayout, frameEntries);
+				if (mDevice.CreateBindGroup(&frameBgDesc) case .Ok(let bg))
+					mFrameBindGroups[fi] = bg;
+				else
+					return false;
+			}
+			else
+			{
+				BindGroupEntry[1] frameEntries = .(.Buffer(0, mFrameUniformBuffers[fi], 0, RenderConstants.FRAME_UNIFORM_SIZE));
+				var frameBgDesc = BindGroupDescriptor(mFrameBindGroupLayout, frameEntries);
+				if (mDevice.CreateBindGroup(&frameBgDesc) case .Ok(let bg))
+					mFrameBindGroups[fi] = bg;
+				else
+					return false;
+			}
+
+			// Per-object uniform buffer
+			var objectBufDesc = BufferDescriptor(objectBufSize, .Uniform | .CopyDst);
+			if (mDevice.CreateBuffer(&objectBufDesc) case .Ok(let objBuf))
+				mObjectUniformBuffers[fi] = objBuf;
+			else
+				return false;
+
+			// Per-object bind group
+			BindGroupEntry[1] objectEntries = .(.Buffer(0, mObjectUniformBuffers[fi], 0, RenderConstants.OBJECT_UNIFORM_SIZE));
+			var objectBgDesc = BindGroupDescriptor(mObjectBindGroupLayout, objectEntries);
+			if (mDevice.CreateBindGroup(&objectBgDesc) case .Ok(let objBg))
+				mObjectBindGroups[fi] = objBg;
+			else
+				return false;
+
+			// Shadow frame uniform buffer
+			var shadowBufDesc = BufferDescriptor(shadowBufSize, .Uniform | .CopyDst);
+			if (mDevice.CreateBuffer(&shadowBufDesc) case .Ok(let shadowBuf))
+				mShadowFrameBuffers[fi] = shadowBuf;
+			else
+				return false;
+
+			// Shadow frame bind group
+			BindGroupEntry[1] shadowEntries = .(.Buffer(0, mShadowFrameBuffers[fi], 0, RenderConstants.FRAME_UNIFORM_SIZE));
+			var shadowBgDesc = BindGroupDescriptor(mShadowFrameBindGroupLayout, shadowEntries);
+			if (mDevice.CreateBindGroup(&shadowBgDesc) case .Ok(let shadowBg))
+				mShadowFrameBindGroups[fi] = shadowBg;
+			else
+				return false;
+		}
 
 		// Empty bind group layout and bind group for shadow pass material slot
 		var emptyLayoutDesc = BindGroupLayoutDescriptor();
@@ -1464,7 +1490,7 @@ public class Renderer
 		}
 
 		// Upload
-		mDevice.Queue.WriteBuffer(mFrameUniformBuffer, 0,
+		mDevice.Queue.WriteBuffer(mFrameUniformBuffers[mCurrentFrameIndex], 0,
 			Span<uint8>((uint8*)&data, sizeof(FrameUniformData)));
 	}
 
@@ -1487,7 +1513,7 @@ public class Renderer
 				objData.LightmapScaleOffset = .(0, 0, 0, 0);
 
 			let offset = (uint64)(objectIndex * RenderConstants.OBJECT_UNIFORM_ALIGN);
-			mDevice.Queue.WriteBuffer(mObjectUniformBuffer, offset,
+			mDevice.Queue.WriteBuffer(mObjectUniformBuffers[mCurrentFrameIndex], offset,
 				Span<uint8>((uint8*)&objData, sizeof(ObjectUniformData)));
 		}
 	}
@@ -1662,7 +1688,7 @@ public class Renderer
 	/// with ViewProjection set to the light's VP matrix for that cascade.
 	private void UploadShadowUniforms()
 	{
-		if (mShadowMap == null || mShadowFrameBuffer == null)
+		if (mShadowMap == null || mShadowFrameBuffers[mCurrentFrameIndex] == null)
 			return;
 
 		let cascades = mShadowMap.Cascades;
@@ -1677,7 +1703,7 @@ public class Renderer
 			data.ViewProjection = cascades[i].ViewProjectionMatrix;
 
 			let offset = (uint64)(i * SHADOW_FRAME_ALIGN);
-			mDevice.Queue.WriteBuffer(mShadowFrameBuffer, offset,
+			mDevice.Queue.WriteBuffer(mShadowFrameBuffers[mCurrentFrameIndex], offset,
 				Span<uint8>((uint8*)&data, sizeof(FrameUniformData)));
 		}
 	}
