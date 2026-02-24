@@ -101,6 +101,13 @@ public class Renderer
 	// Dynamic uniform buffer alignment for shadow cascade slots (ceil(800/256)*256)
 	private const int32 SHADOW_FRAME_ALIGN = 1024;
 
+	// Per-frame command buffers (deferred deletion for GPU sync)
+	private const int MAX_FRAMES_IN_FLIGHT = FrameConfig.MAX_FRAMES_IN_FLIGHT;
+	private ICommandBuffer[MAX_FRAMES_IN_FLIGHT] mCommandBuffers;
+
+	// Current render target format (set per-viewport, used when creating pipelines)
+	private TextureFormat mCurrentColorFormat = .BGRA8UnormSrgb;
+
 	// Frame tracking
 	private uint64 mFrameNumber = 0;
 	private uint64 mLastUpdateFrame = 0;
@@ -199,6 +206,19 @@ public class Renderer
 	/// Shuts down the renderer and releases GPU resources.
 	public void Shutdown()
 	{
+		if (mDevice != null)
+			mDevice.WaitIdle();
+
+		// Clean up in-flight command buffers
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			if (mCommandBuffers[i] != null)
+			{
+				delete mCommandBuffers[i];
+				mCommandBuffers[i] = null;
+			}
+		}
+
 		mViewports.Clear();
 
 		if (mPipelineCache != null)
@@ -371,6 +391,9 @@ public class Renderer
 			if (octree == null)
 				continue;
 
+			// Ensure camera Y-flip matches the graphics backend requirement
+			camera.FlipY = mDevice.FlipProjectionRequired;
+
 			// Step 1: Process pending octree updates (moved drawables)
 			octree.Update();
 
@@ -465,6 +488,19 @@ public class Renderer
 		if (mLastUpdateFrame != mFrameNumber)
 			return;
 
+		// Acquire next swapchain image — waits for in-flight fence (GPU done with this slot)
+		if (swapChain.AcquireNextImage() case .Err)
+			return;
+
+		let frameIndex = (int)swapChain.CurrentFrameIndex;
+
+		// Delete previous command buffer for this frame slot (GPU is done with it after fence wait)
+		if (mCommandBuffers[frameIndex] != null)
+		{
+			delete mCommandBuffers[frameIndex];
+			mCommandBuffers[frameIndex] = null;
+		}
+
 		mResourcePool.BeginFrame();
 
 		for (let viewport in mViewports)
@@ -472,16 +508,23 @@ public class Renderer
 			if (viewport == null || viewport.Scene == null || viewport.Camera == null)
 				continue;
 
-			RenderViewport(viewport, swapChain);
+			RenderViewport(viewport, swapChain, frameIndex);
 		}
+
+		// Present the rendered image
+		swapChain.Present();
 	}
 
 	// ===== Private: Viewport Rendering =====
 
 	/// Renders a single viewport by building and executing its render graph.
-	private void RenderViewport(Viewport viewport, ISwapChain swapChain = null)
+	private void RenderViewport(Viewport viewport, ISwapChain swapChain = null, int frameIndex = 0)
 	{
 		mRenderGraph.Reset();
+
+		// Set current color format from swap chain (used when creating pipelines)
+		if (swapChain != null)
+			mCurrentColorFormat = swapChain.Format;
 
 		let camera = viewport.Camera;
 		let cameraPos = camera.Node != null ? camera.Node.WorldPosition : Vector3.Zero;
@@ -591,11 +634,16 @@ public class Renderer
 
 		// --- Build render graph passes ---
 
-		// Pass 0: Shadow depth pass (renders shadow casters from each cascade's perspective)
-		if (mShadowMap != null && mShadowMap.AtlasTexture != null && mShadowMap.Cascades.Count > 0)
-		{
-			let shadowAtlas = mRenderGraph.ImportTexture("ShadowAtlas",
+		// Import shadow atlas into the render graph (always, so transitions are tracked even when no shadow pass runs)
+		ResourceHandle shadowAtlas = default;
+		bool hasShadowAtlas = mShadowMap != null && mShadowMap.AtlasTexture != null;
+		if (hasShadowAtlas)
+			shadowAtlas = mRenderGraph.ImportTexture("ShadowAtlas",
 				mShadowMap.AtlasTexture, mShadowMap.AtlasView, .Undefined);
+
+		// Pass 0: Shadow depth pass (renders shadow casters from each cascade's perspective)
+		if (hasShadowAtlas && mShadowMap.Cascades.Count > 0)
+		{
 
 			let cascadeCount = (int32)Math.Min(mShadowMap.Cascades.Count, RenderConstants.MAX_SHADOW_CASCADES);
 			let atlasSize = mShadowMap.AtlasSize;
@@ -686,12 +734,21 @@ public class Renderer
 		// Pass 1: Clear + Opaque geometry (depth write enabled)
 		let fogColor = zone.FogColor;
 		mRenderGraph.AddRasterPass("OpaquePass",
-			new [=sceneColor, =depthTarget, =fogColor] (builder) => {
+			new [=sceneColor, =depthTarget, =fogColor, =hasShadowAtlas, =shadowAtlas] (builder) => {
 				builder.SetColorAttachment(0, sceneColor, .Clear, fogColor);
 				builder.SetDepthStencilAttachment(depthTarget, .Clear, 1.0f);
+				// Declare read dependency on shadow atlas so the render graph inserts
+				// the depth-attachment → shader-read-only barrier (or undefined → shader-read-only
+				// when no shadow pass ran).
+				if (hasShadowAtlas)
+					builder.Read(shadowAtlas);
 				builder.SideEffect();
 			},
 			new (encoder) => {
+				// Set viewport and scissor for the full render target
+				encoder.SetViewport(0, 0, (float)vpWidth, (float)vpHeight, 0.0f, 1.0f);
+				encoder.SetScissorRect(0, 0, (uint32)vpWidth, (uint32)vpHeight);
+
 				// Bind per-frame uniforms once for the pass
 				if (mFrameBindGroup != null)
 					encoder.SetBindGroup(1, mFrameBindGroup);
@@ -731,6 +788,10 @@ public class Renderer
 				builder.SideEffect();
 			},
 			new (encoder) => {
+				// Set viewport and scissor for the full render target
+				encoder.SetViewport(0, 0, (float)vpWidth, (float)vpHeight, 0.0f, 1.0f);
+				encoder.SetScissorRect(0, 0, (uint32)vpWidth, (uint32)vpHeight);
+
 				// Bind per-frame uniforms once for the pass
 				if (mFrameBindGroup != null)
 					encoder.SetBindGroup(1, mFrameBindGroup);
@@ -769,10 +830,19 @@ public class Renderer
 			return;
 		}
 
+		ICommandBuffer cmdBuffer = null;
 		if (swapChain != null)
-			mRenderGraph.Execute(mDevice, swapChain);
+			cmdBuffer = mRenderGraph.Execute(mDevice, swapChain);
 		else
-			mRenderGraph.Execute(mDevice);
+			cmdBuffer = mRenderGraph.Execute(mDevice);
+
+		// Store command buffer for deferred deletion (GPU still using it)
+		if (cmdBuffer != null)
+		{
+			if (mCommandBuffers[frameIndex] != null)
+				delete mCommandBuffers[frameIndex];
+			mCommandBuffers[frameIndex] = cmdBuffer;
+		}
 	}
 
 	// ===== Private: Draw =====
@@ -796,6 +866,9 @@ public class Renderer
 			let mat = batch.Material;
 			var pipelineConfig = mat.Material.PipelineConfig;
 
+			// Override color format to match the actual render target
+			pipelineConfig.ColorFormat = mCurrentColorFormat;
+
 			// Override for skinned meshes: use SkinnedMesh layout and Skinned shader variant
 			if (isSkinned)
 			{
@@ -810,7 +883,8 @@ public class Renderer
 				materialLayout = layout;
 
 			// Ensure material GPU resources are up to date
-			mMaterialSystem.PrepareInstance(mat, materialLayout);
+			if(mMaterialSystem.PrepareInstance(mat, materialLayout) not case .Ok)
+				return;
 
 			// Get or create the pipeline (with bone layout at slot 3 for skinned meshes)
 			IBindGroupLayout boneLayout = isSkinned ? mBoneBindGroupLayout : null;
@@ -823,6 +897,10 @@ public class Renderer
 			if (bindGroup != null)
 				encoder.SetBindGroup(0, bindGroup);
 		}
+
+		// Bind per-frame uniforms at slot 1
+		if (mFrameBindGroup != null)
+			encoder.SetBindGroup(1, mFrameBindGroup);
 
 		// Bind per-object uniforms at slot 2 with dynamic offset
 		if (mObjectBindGroup != null)
@@ -1002,6 +1080,7 @@ public class Renderer
 			{
 				let mat = firstBatch.Material;
 				var pipelineConfig = mat.Material.PipelineConfig;
+				pipelineConfig.ColorFormat = mCurrentColorFormat;
 				pipelineConfig.ShaderFlags |= .Instanced;
 
 				let layoutResult = mMaterialSystem.GetOrCreateLayout(mat.Material);
@@ -1323,10 +1402,10 @@ public class Renderer
 
 		// Zone ambient and fog
 		let ambient = zone.AmbientColor;
-		data.AmbientColor = .(ambient.R, ambient.G, ambient.B, ambient.A);
+		data.AmbientColor = .((float)ambient.R / 255.0f, (float)ambient.G / 255.0f, (float)ambient.B / 255.0f, (float)ambient.A / 255.0f);
 
 		let fogColor = zone.FogColor;
-		data.FogParams1 = .(fogColor.R, fogColor.G, fogColor.B, zone.FogStart);
+		data.FogParams1 = .((float)fogColor.R / 255.0f, (float)fogColor.G / 255.0f, (float)fogColor.B / 255.0f, zone.FogStart);
 		data.FogParams2 = .(zone.FogEnd, 0, (float)mLightList.Count, 0);
 
 		// Pack lights (up to MAX_SHADER_LIGHTS)
@@ -1341,7 +1420,7 @@ public class Renderer
 			data.Lights[i].PositionAndRange = .(pos.X, pos.Y, pos.Z, light.Range);
 			data.Lights[i].DirectionAndSpotAngle = .(dir.X, dir.Y, dir.Z,
 				Math.Cos(light.SpotFov * 0.5f));
-			data.Lights[i].ColorAndIntensity = .(col.R, col.G, col.B, light.SpecularIntensity);
+			data.Lights[i].ColorAndIntensity = .((float)col.R / 255.0f, (float)col.G / 255.0f, (float)col.B / 255.0f, light.SpecularIntensity);
 			data.Lights[i].TypeAndParams = .((float)light.LightType,
 				Math.Cos(light.SpotInnerFov * 0.5f), 0, 0);
 		}
