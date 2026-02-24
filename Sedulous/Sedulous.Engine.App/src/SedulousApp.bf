@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.IO;
 using Sedulous.Foundation.Logging.Abstractions;
 using Sedulous.Foundation.Logging.Console;
 using Sedulous.Engine.Core;
@@ -36,6 +37,9 @@ public class SedulousApp : Application
 	private ResourceSystem mResourceSystem;
 	private ConsoleLogger mDefaultLogger;
 
+	// Asset directory (discovered at startup)
+	private String mAssetDirectory = new .() ~ delete _;
+
 	// Per-frame command buffers
 	private const int MAX_FRAMES_IN_FLIGHT = FrameConfig.MAX_FRAMES_IN_FLIGHT;
 	private ICommandBuffer[MAX_FRAMES_IN_FLIGHT] mCommandBuffers;
@@ -52,6 +56,16 @@ public class SedulousApp : Application
 	/// The shell (windowing/input).
 	public IShell Shell => mShell;
 
+	/// The discovered Assets directory (absolute path).
+	public StringView AssetDirectory => mAssetDirectory;
+
+	/// Builds an absolute path by combining the asset directory with a relative path.
+	public void GetAssetPath(StringView relativePath, String outPath)
+	{
+		outPath.Clear();
+		Path.InternalCombine(outPath, mAssetDirectory, relativePath);
+	}
+
 	protected override bool InitializeSubsystems()
 	{
 		// Create default logger if none provided
@@ -62,6 +76,10 @@ public class SedulousApp : Application
 		}
 
 		Logger.LogInformation("Initializing subsystems...");
+
+		// Discover assets directory
+		DiscoverAssetDirectory();
+		Logger.LogInformation("Asset directory: {}", mAssetDirectory);
 
 		// --- Shell (SDL3) ---
 		mShell = new SDL3Shell();
@@ -218,6 +236,43 @@ public class SedulousApp : Application
 			Logger = null;
 			delete mDefaultLogger;
 			mDefaultLogger = null;
+		}
+	}
+
+	/// Discovers the Assets directory by searching from the current directory upward.
+	/// The Assets directory is identified by containing a `.assets` marker file.
+	private void DiscoverAssetDirectory()
+	{
+		let currentDir = Directory.GetCurrentDirectory(.. scope .());
+		String searchDir = scope .(currentDir);
+
+		while (true)
+		{
+			let assetsPath = scope String();
+			Path.InternalCombine(assetsPath, searchDir, "Assets");
+
+			if (Directory.Exists(assetsPath))
+			{
+				let markerPath = scope String();
+				Path.InternalCombine(markerPath, assetsPath, ".assets");
+
+				if (File.Exists(markerPath))
+				{
+					mAssetDirectory.Set(assetsPath);
+					return;
+				}
+			}
+
+			let parentDir = Path.GetDirectoryPath(searchDir, .. scope .());
+
+			if (parentDir.IsEmpty || parentDir == searchDir)
+			{
+				Logger?.LogWarning("Could not find Assets directory with .assets marker. Using 'Assets' relative path.");
+				mAssetDirectory.Set("Assets");
+				return;
+			}
+
+			searchDir.Set(parentDir);
 		}
 	}
 
