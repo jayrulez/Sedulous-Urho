@@ -156,10 +156,12 @@ public class RenderGraph
 	}
 
 	/// Executes the compiled render graph, inserting barriers and dispatching passes.
-	public void Execute(IDevice device)
+	/// Returns the submitted command buffer. Caller owns the returned buffer and must
+	/// defer deletion until the GPU has finished executing it (typically next frame after fence wait).
+	public ICommandBuffer Execute(IDevice device)
 	{
 		if (!mCompiled)
-			return;
+			return null;
 
 		let encoder = device.CreateCommandEncoder();
 
@@ -182,15 +184,17 @@ public class RenderGraph
 
 		let commandBuffer = encoder.Finish();
 		device.Queue.Submit(commandBuffer);
-		delete commandBuffer;
 		delete encoder;
+		return commandBuffer;
 	}
 
 	/// Executes the compiled render graph with a swap chain for presentation sync.
-	public void Execute(IDevice device, ISwapChain swapChain)
+	/// Returns the submitted command buffer. Caller owns the returned buffer and must
+	/// defer deletion until the GPU has finished executing it (typically next frame after fence wait).
+	public ICommandBuffer Execute(IDevice device, ISwapChain swapChain)
 	{
 		if (!mCompiled)
-			return;
+			return null;
 
 		let encoder = device.CreateCommandEncoder();
 
@@ -213,8 +217,8 @@ public class RenderGraph
 
 		let commandBuffer = encoder.Finish();
 		device.Queue.Submit(commandBuffer, swapChain);
-		delete commandBuffer;
 		delete encoder;
+		return commandBuffer;
 	}
 
 	/// Resets the graph for the next frame.
@@ -506,6 +510,8 @@ public class RenderGraph
 			pass.RasterExecute(renderPassEncoder);
 
 		renderPassEncoder.End();
+
+		delete renderPassEncoder;
 	}
 
 	/// Executes a compute pass.
