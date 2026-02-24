@@ -42,15 +42,18 @@ internal class Octant
 	{
 		if (Children[index] == null)
 		{
-			let childHalf = HalfSize * 0.5f;
-			var min = Center;
-			if ((index & 1) == 0) min.X -= childHalf; else min.X = Center.X;
-			if ((index & 2) == 0) min.Y -= childHalf; else min.Y = Center.Y;
-			if ((index & 4) == 0) min.Z -= childHalf; else min.Z = Center.Z;
+			// Each child covers one half of the parent along each axis.
+			// Negative half: [WorldBounds.Min, Center], Positive half: [Center, WorldBounds.Max]
+			var min = Vector3.Zero;
+			var max = Vector3.Zero;
+			min.X = ((index & 1) == 0) ? WorldBounds.Min.X : Center.X;
+			min.Y = ((index & 2) == 0) ? WorldBounds.Min.Y : Center.Y;
+			min.Z = ((index & 4) == 0) ? WorldBounds.Min.Z : Center.Z;
+			max.X = ((index & 1) == 0) ? Center.X : WorldBounds.Max.X;
+			max.Y = ((index & 2) == 0) ? Center.Y : WorldBounds.Max.Y;
+			max.Z = ((index & 4) == 0) ? Center.Z : WorldBounds.Max.Z;
 
-			let childBounds = BoundingBox(min, min + Vector3(childHalf));
-
-			Children[index] = new Octant(childBounds, Level + 1, this);
+			Children[index] = new Octant(BoundingBox(min, max), Level + 1, this);
 		}
 		return Children[index];
 	}
@@ -139,6 +142,20 @@ public class Octree : Component
 		let bounds = BoundingBox(Vector3(-halfSize), Vector3(halfSize));
 		mRoot = new Octant(bounds, 0, null);
 		mMaxLevels = DEFAULT_MAX_LEVELS;
+	}
+
+	/// When the octree is removed from the scene, disconnect all drawables
+	/// so they don't try to call Remove() on an already-deleted octree
+	/// during scene teardown.
+	protected override void OnRemoved()
+	{
+		if (mRoot != null)
+		{
+			let allDrawables = scope List<Drawable>();
+			CollectAllDrawables(mRoot, allDrawables);
+			for (let drawable in allDrawables)
+				drawable.OctreeRef = null;
+		}
 	}
 
 	/// Sets the world size and maximum subdivision levels.
