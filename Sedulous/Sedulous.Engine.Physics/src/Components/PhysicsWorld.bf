@@ -275,6 +275,30 @@ public class PhysicsWorld : Component
 
 	protected override void OnRemoved()
 	{
+		// Disconnect all tracked RigidBody and their CollisionShape components
+		// so they don't try to access this PhysicsWorld during scene teardown
+		// (PhysicsWorld is destroyed before child node components).
+		for (let kv in mTrackedBodies)
+		{
+			if (let rb = kv.value as RigidBody)
+			{
+				rb.[Friend]mBodyHandle = .Invalid;
+				rb.[Friend]mPhysicsWorld = null;
+
+				// Also disconnect the CollisionShape on the same node
+				if (rb.Node != null)
+				{
+					for (let comp in rb.Node.Components)
+					{
+						if (let cs = comp as CollisionShape)
+						{
+							cs.[Friend]mShapeHandle = .Invalid;
+							cs.[Friend]mPhysicsWorld = null;
+						}
+					}
+				}
+			}
+		}
 		mTrackedBodies.Clear();
 	}
 }
