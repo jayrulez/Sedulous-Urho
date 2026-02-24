@@ -37,13 +37,15 @@ public struct FrustumCuller
 		for (int i = 0; i < 6; i++)
 		{
 			let p = frustumPlanes[i];
-			// Store as Ax + By + Cz + D = 0 form
-			Planes[i] = .(p.Normal.X, p.Normal.Y, p.Normal.Z, p.D);
+			// Negate planes: BoundingFrustum stores outward-pointing normals,
+			// but the p-vertex culling test (dot < 0 → outside) requires
+			// inward-pointing normals where dot > 0 means inside the frustum.
+			Planes[i] = .(-p.Normal.X, -p.Normal.Y, -p.Normal.Z, -p.D);
 
-			// Positive vertex: for each axis, pick Max if normal component is positive
-			PosX[i] = p.Normal.X >= 0;
-			PosY[i] = p.Normal.Y >= 0;
-			PosZ[i] = p.Normal.Z >= 0;
+			// Positive vertex: for each axis, pick Max if (inward) normal component is positive
+			PosX[i] = -p.Normal.X >= 0;
+			PosY[i] = -p.Normal.Y >= 0;
+			PosZ[i] = -p.Normal.Z >= 0;
 		}
 	}
 
