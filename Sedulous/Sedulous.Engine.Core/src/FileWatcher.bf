@@ -198,8 +198,9 @@ public class FileWatcher
 
 	private void PollDirectory(ref WatchedDirectory dir)
 	{
-		// Track which files we've seen this poll
-		let seenFiles = scope HashSet<StringView>();
+		// Track which files we've seen this poll (use owned strings for stable keys)
+		let seenFiles = scope HashSet<String>();
+		defer { for (let s in seenFiles) delete s; }
 
 		for (let entry in Directory.EnumerateFiles(dir.Path))
 		{
@@ -209,15 +210,15 @@ public class FileWatcher
 			if (!MatchesExtensions(filePath, dir.Extensions))
 				continue;
 
-			seenFiles.Add(StringView(filePath));
+			seenFiles.Add(new String(filePath));
 			let writeTime = entry.GetLastWriteTime();
 
-			if (dir.FileTimestamps.TryGetValue(filePath, var existingTime))
+			if (dir.FileTimestamps.TryGetRefAlt(filePath, var keyPtr, var valuePtr))
 			{
 				// File exists — check if modified
-				if (writeTime != existingTime)
+				if (writeTime != *valuePtr)
 				{
-					dir.FileTimestamps[scope String(filePath)] = writeTime;
+					*valuePtr = writeTime;
 					QueueChange(.Modified, filePath);
 				}
 			}
