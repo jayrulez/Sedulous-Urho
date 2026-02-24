@@ -379,7 +379,7 @@ class DemoApp : SedulousApp
 	{
 		mRenderer.Update(Engine.DeltaTime);
 		// DEBUG: Full GPU sync to detect buffer thrashing
-		Device.WaitIdle();
+		//Device.WaitIdle();
 		mRenderer.Render(SwapChain);
 	}
 
