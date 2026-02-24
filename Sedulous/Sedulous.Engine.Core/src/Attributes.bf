@@ -30,7 +30,7 @@ public struct EngineComponentAttribute : Attribute
 ///   [Editable("Cast Shadows")]
 ///   bool mCastShadows = true;
 ///
-[AttributeUsage(.Field, .ReflectAttribute)]
+[AttributeUsage(.Field | .Property, .ReflectAttribute)]
 public struct EditableAttribute : Attribute
 {
 	/// Display name shown in editor. If null, the field name is used.

@@ -2,9 +2,10 @@ using System;
 using System.Collections;
 using Sedulous.RHI;
 using Sedulous.Foundation.Mathematics;
-using internal Sedulous.RenderGraph;
 
 namespace Sedulous.RenderGraph;
+
+using internal Sedulous.RenderGraph;
 
 /// Callback for setting up a pass (declaring resource dependencies).
 public delegate void PassSetupCallback(RenderGraphBuilder builder);
@@ -479,9 +480,8 @@ public class RenderGraph
 		}
 
 		// Build descriptor
-		RenderPassDescriptor desc = .()
+		RenderPassDescriptor desc = .(colorAttachments)
 		{
-			ColorAttachments = Span<RenderPassColorAttachment>(colorAttachments.CArray(), colorCount),
 			Label = pass.Name
 		};
 

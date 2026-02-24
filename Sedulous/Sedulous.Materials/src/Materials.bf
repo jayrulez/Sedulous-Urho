@@ -75,12 +75,19 @@ static class Materials
 	/// Creates a depth-only material for shadow passes.
 	public static Material CreateShadow(StringView name, String shaderName = null)
 	{
-		var config = PipelineConfig.ForShadow("shadow");
 		let builder = scope MaterialBuilder(name);
 		builder.Shader(shaderName ?? "shadow");
 		builder.VertexLayout(.PositionOnly);
+		builder.Depth(.ReadWrite);
+		builder.Cull(.Front);
 		let mat = builder.Build();
-		mat.PipelineConfig = config;
+		// Apply shadow-specific pipeline settings on top of the builder's config
+		mat.PipelineConfig.ShaderFlags |= .CastShadows;
+		mat.PipelineConfig.DepthOnly = true;
+		mat.PipelineConfig.DepthFormat = .Depth32Float;
+		mat.PipelineConfig.ColorTargetCount = 0;
+		mat.PipelineConfig.DepthBias = 2;
+		mat.PipelineConfig.DepthBiasSlopeScale = 2.0f;
 		return mat;
 	}
 }

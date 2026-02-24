@@ -59,6 +59,10 @@ enum VertexLayoutType : uint8
 	Mesh,
 	/// Skinned mesh format: Position + Normal + UV + Tangent + Joints + Weights (80 bytes).
 	SkinnedMesh,
+	/// Decal format: Position (float3) + Normal (float3) + UV (float2) + Color (ubyte4norm) = 36 bytes.
+	Decal,
+	/// Debug line format: Position (float3) + Color (ubyte4norm) = 16 bytes.
+	DebugLine,
 	/// Custom layout (use CustomVertexLayout).
 	Custom
 }
@@ -308,6 +312,29 @@ struct PipelineConfig : IHashable, IEquatable<PipelineConfig>
 		config.VertexLayout = .None;
 		config.DepthMode = .Disabled;
 		config.CullMode = .None;
+		return config;
+	}
+
+	/// Creates a config for decal rendering (Decal layout, alpha blended on surfaces).
+	public static Self ForDecals(StringView shaderName = "decal")
+	{
+		var config = Self();
+		config.ShaderName = shaderName;
+		config.VertexLayout = .Decal;
+		config.BlendMode = .AlphaBlend;
+		config.DepthMode = .ReadOnly;
+		config.CullMode = .None; // Decals can be viewed from both sides
+		return config;
+	}
+
+	/// Creates a config for terrain rendering (MeshNoTangent layout: Position + Normal + UV).
+	public static Self ForTerrain(StringView shaderName = "terrain")
+	{
+		var config = Self();
+		config.ShaderName = shaderName;
+		config.VertexLayout = .MeshNoTangent;
+		config.BlendMode = .Opaque;
+		config.DepthMode = .ReadWrite;
 		return config;
 	}
 

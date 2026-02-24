@@ -61,6 +61,12 @@ enum ShaderFlags : uint32
 	/// Enable depth-based soft particle fading.
 	SoftParticles = 1 << 13,
 
+	/// Enable lightmap sampling from baked lightmap atlas.
+	Lightmapped = 1 << 14,
+
+	/// Enable Image-Based Lighting (IBL) for ambient specular and diffuse.
+	IBL = 1 << 15,
+
 	// ===== Common Combinations =====
 
 	/// Default opaque mesh flags.
@@ -79,7 +85,7 @@ enum ShaderFlags : uint32
 	DefaultSoftParticle = DepthTest | SoftParticles,
 
 	/// All feature flags (excluding depth/shadow config).
-	AllFeatures = Skinned | Instanced | AlphaTest | NormalMap | Emissive | Wireframe | DoubleSided | VertexColors | SoftParticles
+	AllFeatures = Skinned | Instanced | AlphaTest | NormalMap | Emissive | Wireframe | DoubleSided | VertexColors | SoftParticles | Lightmapped | IBL
 }
 
 extension ShaderFlags
@@ -116,6 +122,10 @@ extension ShaderFlags
 			outDefines.Append("#define VERTEX_COLORS 1\n");
 		if (HasFlag(.SoftParticles))
 			outDefines.Append("#define SOFT_PARTICLES 1\n");
+		if (HasFlag(.Lightmapped))
+			outDefines.Append("#define LIGHTMAPPED 1\n");
+		if (HasFlag(.IBL))
+			outDefines.Append("#define IBL 1\n");
 	}
 
 	/// Gets a short string representation for cache keys.
@@ -135,5 +145,7 @@ extension ShaderFlags
 		if (HasFlag(.DoubleSided)) outKey.Append("Ds");
 		if (HasFlag(.VertexColors)) outKey.Append("Vc");
 		if (HasFlag(.SoftParticles)) outKey.Append("Sp");
+		if (HasFlag(.Lightmapped)) outKey.Append("Lm");
+		if (HasFlag(.IBL)) outKey.Append("Ib");
 	}
 }

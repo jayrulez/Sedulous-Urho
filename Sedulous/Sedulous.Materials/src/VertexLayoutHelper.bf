@@ -13,11 +13,12 @@ public static class VertexLayoutHelper
 		.(VertexFormat.Float3, 0, 0)   // Position
 	);
 
-	/// PositionUVColor: Position (float3) + UV (float2) + Color (float4)
+	/// PositionUVColor: Position (float3) + UV (float2) + Color (ubyte4norm) = 24 bytes
+	/// Matches BillboardSet, ParticleEmitter, and Sprite2D vertex format.
 	public static VertexAttribute[3] PositionUVColorAttributes = .(
-		.(VertexFormat.Float3, 0, 0),   // Position
-		.(VertexFormat.Float2, 12, 1),  // UV
-		.(VertexFormat.Float4, 20, 2)   // Color
+		.(VertexFormat.Float3, 0, 0),           // Position
+		.(VertexFormat.Float2, 12, 1),          // UV
+		.(VertexFormat.UByte4Normalized, 20, 2) // Color (packed RGBA)
 	);
 
 	/// MeshNoTangent: Position (float3) + Normal (float3) + UV (float2) - simple format without tangent
@@ -48,6 +49,20 @@ public static class VertexLayoutHelper
 		.(VertexFormat.Float4, 64, 6)   // Joint Weights
 	);
 
+	/// Decal: Position (float3) + Normal (float3) + UV (float2) + Color (ubyte4norm) = 36 bytes
+	public static VertexAttribute[4] DecalAttributes = .(
+		.(VertexFormat.Float3, 0, 0),           // Position
+		.(VertexFormat.Float3, 12, 1),          // Normal
+		.(VertexFormat.Float2, 24, 2),          // UV
+		.(VertexFormat.UByte4Normalized, 32, 3) // Color
+	);
+
+	/// DebugLine: Position (float3) + Color (ubyte4norm) = 16 bytes
+	public static VertexAttribute[2] DebugLineAttributes = .(
+		.(VertexFormat.Float3, 0, 0),           // Position
+		.(VertexFormat.UByte4Normalized, 12, 1) // Color
+	);
+
 	/// Instance data: 4 x float4 (world matrix rows) - for GPU instancing
 	/// Used as second vertex buffer with per-instance step rate
 	/// Instance data starts at location 5 (after Position=0, Normal=1, UV=2, Color=3, Tangent=4)
@@ -69,10 +84,12 @@ public static class VertexLayoutHelper
 		{
 		case .None: return 0;
 		case .PositionOnly: return 12;       // float3
-		case .PositionUVColor: return 36;    // float3 + float2 + float4
+		case .PositionUVColor: return 24;    // float3 + float2 + ubyte4
 		case .MeshNoTangent: return 32;      // float3 + float3 + float2
 		case .Mesh: return 48;               // float3 + float3 + float2 + ubyte4 + float3
 		case .SkinnedMesh: return 80;        // Mesh + uint4 + float4
+		case .Decal: return 36;              // float3 + float3 + float2 + ubyte4
+		case .DebugLine: return 16;          // float3 + ubyte4
 		case .Custom: return 0;              // Custom layouts define their own stride
 		}
 	}
@@ -88,6 +105,8 @@ public static class VertexLayoutHelper
 		case .MeshNoTangent: return 3;
 		case .Mesh: return 5;
 		case .SkinnedMesh: return 7;
+		case .Decal: return 4;
+		case .DebugLine: return 2;
 		case .Custom: return 0;
 		}
 	}
@@ -103,6 +122,8 @@ public static class VertexLayoutHelper
 		case .MeshNoTangent: return MeshNoTangentAttributes;
 		case .Mesh: return MeshAttributes;
 		case .SkinnedMesh: return SkinnedMeshAttributes;
+		case .Decal: return DecalAttributes;
+		case .DebugLine: return DebugLineAttributes;
 		case .Custom: return default;
 		}
 	}
