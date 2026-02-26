@@ -378,6 +378,7 @@ public class Renderer
 	{
 		mFrameNumber++;
 		mTotalTime += timeStep;
+		mCurrentFrameIndex = (int32)(mFrameNumber % MAX_FRAMES_IN_FLIGHT);
 
 		// Reset per-frame stats
 		mStatDrawCalls = 0;
@@ -442,6 +443,16 @@ public class Renderer
 			GetViewportDimensions(viewport, out frameInfo.ViewportWidth, out frameInfo.ViewportHeight);
 
 			ProcessVisibleDrawables(mVisibleGeometry, cameraPos, frameInfo);
+
+			// Step 4b: Upload dynamic geometry vertex data to GPU.
+			// Must happen after UpdateBatches (which builds CPU geometry) but before
+			// CollectAndSortBatches (which copies SourceBatch structs by value).
+			// UploadToGPU may recreate GPU buffers and patches MutableBatches with
+			// the new buffer pointers so the collected copies are correct.
+			UploadBillboardBuffers();
+			UploadTerrainBuffers();
+			UploadDecalBuffers();
+			UploadDynamicGeometryBuffers();
 
 			// Step 5: Collect light list
 			mLightList.Clear();
@@ -561,17 +572,8 @@ public class Renderer
 		// Upload bone matrices for visible animated models
 		UploadBoneMatrices();
 
-		// Upload billboard/particle vertex data
-		UploadBillboardBuffers();
-
-		// Upload terrain vertex data
-		UploadTerrainBuffers();
-
-		// Upload decal geometry
-		UploadDecalBuffers();
-
-		// Upload ribbon trail, sprite, and procedural geometry
-		UploadDynamicGeometryBuffers();
+		// Dynamic geometry (billboard, terrain, decal, ribbon, etc.) already uploaded
+		// in Update() before batch collection.
 
 		// Prepare debug renderer (upload vertex data, ensure pipelines exist)
 		let debugRenderer = viewport.Scene.GetComponent<DebugRenderer>();
@@ -784,6 +786,9 @@ public class Renderer
 				// Draw depth-tested debug lines
 				if (hasDebug)
 				{
+					// Set debug pipeline first so bind groups validate against it
+					if (mDebugDepthPipeline != null)
+						encoder.SetPipeline(mDebugDepthPipeline);
 					if (mEmptyBindGroup != null)
 						encoder.SetBindGroup(0, mEmptyBindGroup);
 					if (mFrameBindGroups[mCurrentFrameIndex] != null)
@@ -820,6 +825,9 @@ public class Renderer
 				// Draw overlay (no depth test) debug lines
 				if (hasDebug)
 				{
+					// Set debug pipeline first so bind groups validate against it
+					if (mDebugNoDepthPipeline != null)
+						encoder.SetPipeline(mDebugNoDepthPipeline);
 					if (mEmptyBindGroup != null)
 						encoder.SetBindGroup(0, mEmptyBindGroup);
 					if (mFrameBindGroups[mCurrentFrameIndex] != null)
@@ -1531,44 +1539,48 @@ public class Renderer
 	/// Uploads billboard/particle vertex data to the GPU for all visible BillboardSets.
 	private void UploadBillboardBuffers()
 	{
+		let fi = mCurrentFrameIndex;
 		for (let drawable in mVisibleGeometry)
 		{
 			if (let billboardSet = drawable as BillboardSet)
-				billboardSet.UploadToGPU(mDevice);
+				billboardSet.UploadToGPU(mDevice, fi);
 		}
 	}
 
 	/// Uploads ribbon trail, sprite, and procedural geometry to the GPU.
 	private void UploadDynamicGeometryBuffers()
 	{
+		let fi = mCurrentFrameIndex;
 		for (let drawable in mVisibleGeometry)
 		{
 			if (let trail = drawable as RibbonTrail)
-				trail.UploadToGPU(mDevice);
+				trail.UploadToGPU(mDevice, fi);
 			else if (let sprite = drawable as Sprite2D)
-				sprite.UploadToGPU(mDevice);
+				sprite.UploadToGPU(mDevice, fi);
 			else if (let procGeo = drawable as ProceduralGeometry)
-				procGeo.UploadToGPU(mDevice);
+				procGeo.UploadToGPU(mDevice, fi);
 		}
 	}
 
 	/// Uploads decal geometry to the GPU for all visible DecalSets.
 	private void UploadDecalBuffers()
 	{
+		let fi = mCurrentFrameIndex;
 		for (let drawable in mVisibleGeometry)
 		{
 			if (let decalSet = drawable as DecalSet)
-				decalSet.UploadToGPU(mDevice);
+				decalSet.UploadToGPU(mDevice, fi);
 		}
 	}
 
 	/// Uploads terrain vertex/index data to the GPU for all visible Terrains.
 	private void UploadTerrainBuffers()
 	{
+		let fi = mCurrentFrameIndex;
 		for (let drawable in mVisibleGeometry)
 		{
 			if (let terrain = drawable as Terrain)
-				terrain.UploadToGPU(mDevice);
+				terrain.UploadToGPU(mDevice, fi);
 		}
 	}
 
@@ -1626,18 +1638,23 @@ public class Renderer
 		depthConfig.CullMode = .None;
 		depthConfig.DepthMode = .ReadWrite;
 		depthConfig.BlendMode = .Opaque;
+		depthConfig.ColorFormat = mCurrentColorFormat;
 
 		if (mPipelineCache.GetOrCreate(depthConfig, mEmptyBindGroupLayout, mFrameBindGroupLayout) case .Ok(let depthPl))
 			mDebugDepthPipeline = depthPl;
 
-		// Overlay (no depth test) debug line pipeline
+		// Overlay (no depth test) debug line pipeline.
+		// Must still declare depth format for render pass compatibility;
+		// use ReadOnly + Always to effectively disable depth testing.
 		var noDepthConfig = PipelineConfig();
 		noDepthConfig.ShaderName = "debug";
 		noDepthConfig.VertexLayout = .DebugLine;
 		noDepthConfig.Topology = .LineList;
 		noDepthConfig.CullMode = .None;
-		noDepthConfig.DepthMode = .Disabled;
+		noDepthConfig.DepthMode = .ReadOnly;
+		noDepthConfig.DepthCompare = .Always;
 		noDepthConfig.BlendMode = .Opaque;
+		noDepthConfig.ColorFormat = mCurrentColorFormat;
 
 		if (mPipelineCache.GetOrCreate(noDepthConfig, mEmptyBindGroupLayout, mFrameBindGroupLayout) case .Ok(let noDepthPl))
 			mDebugNoDepthPipeline = noDepthPl;

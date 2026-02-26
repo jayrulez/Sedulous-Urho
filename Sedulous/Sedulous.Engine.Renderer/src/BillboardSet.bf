@@ -44,13 +44,16 @@ public struct Billboard
 [EngineComponent("Rendering")]
 public class BillboardSet : Drawable
 {
+	private const int32 MAX_FRAMES = FrameConfig.MAX_FRAMES_IN_FLIGHT;
+
 	protected List<Billboard> mBillboards = new .() ~ delete _;
-	private IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
-	private IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
+	// Per-frame GPU buffers to avoid destroying buffers still in use by previous frames
+	private IBuffer[MAX_FRAMES] mVertexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private int32[MAX_FRAMES] mLastEnabledCounts;
 	private uint8[] mVertexData ~ delete _;
 	private uint8[] mIndexData ~ delete _;
 	private List<int32> mSortedIndices = new .() ~ delete _;
-	private int32 mLastEnabledCount = 0;
 	private bool mBuffersDirty = true;
 	private MaterialInstance mMaterial;
 	private bool mFaceCameraPosition = false;
@@ -153,7 +156,12 @@ public class BillboardSet : Drawable
 		// Build CPU-side vertex/index data
 		BuildGeometry(cameraPos, cameraRight, cameraUp, enabledCount);
 
-		// Submit a single batch for all billboards
+		// Update bounding box from billboard positions and sizes (local space)
+		UpdateBillboardBounds();
+
+		// Submit a single batch for all billboards.
+		// Buffer pointers are set to null here; UploadToGPU patches them
+		// with the correct per-frame buffer before batch collection.
 		let distance = Vector3.Distance(Node.WorldPosition, cameraPos);
 		SourceBatch batch = .()
 		{
@@ -161,8 +169,8 @@ public class BillboardSet : Drawable
 			Distance = distance,
 			StartIndex = 0,
 			IndexCount = enabledCount * 6,
-			VertexBuffer = mVertexBuffer,
-			IndexBuffer = mIndexBuffer,
+			VertexBuffer = null,
+			IndexBuffer = null,
 			IndexBufferFormat = .UInt16,
 			Material = mMaterial,
 			Drawable = this
@@ -173,8 +181,8 @@ public class BillboardSet : Drawable
 	// ===== GPU Upload =====
 
 	/// Uploads the current billboard geometry to the GPU.
-	/// Call after UpdateBatches() and before rendering.
-	public Result<void> UploadToGPU(IDevice device)
+	/// Uses per-frame buffers to avoid destroying buffers still in use by the GPU.
+	public Result<void> UploadToGPU(IDevice device, int32 frameIndex)
 	{
 		int32 enabledCount = 0;
 		for (let bb in mBillboards)
@@ -183,34 +191,42 @@ public class BillboardSet : Drawable
 		if (enabledCount == 0)
 			return .Ok;
 
+		let fi = frameIndex;
 		let vertexDataSize = (uint64)(enabledCount * 4 * VERTEX_SIZE);
 		let indexDataSize = (uint64)(enabledCount * 6 * 2);
 
-		// Recreate buffers if enabled count changed
-		if (mVertexBuffer == null || mLastEnabledCount != enabledCount)
+		// Recreate this frame's buffers if enabled count changed
+		if (mVertexBuffers[fi] == null || mLastEnabledCounts[fi] != enabledCount)
 		{
-			if (mVertexBuffer != null) { delete mVertexBuffer; mVertexBuffer = null; }
-			if (mIndexBuffer != null) { delete mIndexBuffer; mIndexBuffer = null; }
+			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
 
 			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
-				mVertexBuffer = vb;
+				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
 			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
-				mIndexBuffer = ib;
+				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mLastEnabledCount = enabledCount;
+			mLastEnabledCounts[fi] = enabledCount;
 		}
 
 		if (mVertexData != null && vertexDataSize > 0)
-			device.Queue.WriteBuffer(mVertexBuffer, 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
+			device.Queue.WriteBuffer(mVertexBuffers[fi], 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
 		if (mIndexData != null && indexDataSize > 0)
-			device.Queue.WriteBuffer(mIndexBuffer, 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+			device.Queue.WriteBuffer(mIndexBuffers[fi], 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+
+		// Patch batch entries with current frame's buffer pointers
+		for (int32 i = 0; i < MutableBatches.Count; i++)
+		{
+			MutableBatches[i].VertexBuffer = mVertexBuffers[fi];
+			MutableBatches[i].IndexBuffer = mIndexBuffers[fi];
+		}
 
 		mBuffersDirty = false;
 		return .Ok;
@@ -336,5 +352,26 @@ public class BillboardSet : Drawable
 			indices[4] = vi + 2;
 			indices[5] = vi + 3;
 		}
+	}
+
+	private void UpdateBillboardBounds()
+	{
+		var min = Vector3(float.MaxValue);
+		var max = Vector3(float.MinValue);
+		bool anyEnabled = false;
+
+		for (let bb in mBillboards)
+		{
+			if (!bb.Enabled)
+				continue;
+			anyEnabled = true;
+			let halfSize = Math.Max(bb.Size.X, bb.Size.Y) * 0.5f;
+			let expand = Vector3(halfSize);
+			min = Vector3.Min(min, bb.Position - expand);
+			max = Vector3.Max(max, bb.Position + expand);
+		}
+
+		if (anyEnabled)
+			BoundingBox = .(min, max);
 	}
 }

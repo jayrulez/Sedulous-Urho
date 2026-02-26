@@ -9,6 +9,8 @@ using Sedulous.Geometry;
 using Sedulous.Materials;
 using Sedulous.Shell;
 using Sedulous.Shell.Input;
+using Sedulous.Imaging;
+using Sedulous.RHI;
 
 namespace Sedulous.Engine.App;
 
@@ -26,6 +28,17 @@ class DemoApp : SedulousApp
 	// Physics
 	private JoltPhysicsWorld mJoltWorld;
 	private List<RigidBody> mDynamicBodies = new .() ~ delete _;
+
+	// Particles (non-owning refs; scene owns the components)
+	private Material mParticleMaterial;
+
+	// Sprite
+	private Material mSpriteMaterial;
+	private ITexture mSpriteTexture;
+	private ITextureView mSpriteTextureView;
+
+	// Debug
+	private DebugRenderer mDebugRenderer;
 
 	// Owned resources (not managed by scene)
 	private Material mPbrMaterial;
@@ -67,6 +80,7 @@ class DemoApp : SedulousApp
 		// --- Create Scene ---
 		mScene = new Scene();
 		mScene.CreateComponent<Octree>();
+		mDebugRenderer = mScene.CreateComponent<DebugRenderer>();
 
 		// --- Physics ---
 		if (JoltPhysicsWorld.Create(.Default) case .Ok(let joltWorld))
@@ -96,8 +110,14 @@ class DemoApp : SedulousApp
 		// --- Ground Plane ---
 		CreateGround();
 
-		// --- 200 Random Objects ---
-		CreateObjects(200);
+		// --- Random Objects ---
+		CreateObjects(20);
+
+		// --- Particle Effects ---
+		CreateParticles();
+
+		// --- Sprite ---
+		CreateSprite();
 
 		// --- Viewport ---
 		mViewport = new Viewport(mScene, camera);
@@ -134,6 +154,7 @@ class DemoApp : SedulousApp
 	{
 		let planeNode = mScene.CreateChild("Ground");
 		planeNode.Scale = .(50, 1, 50);
+		planeNode.Position = .(0,0,0);
 
 		let planeModel = planeNode.CreateComponent<StaticModel>();
 		let planeMesh = StaticMesh.CreatePlane(1.0f, 1.0f, 1, 1);
@@ -229,6 +250,146 @@ class DemoApp : SedulousApp
 		}
 	}
 
+	private void CreateParticles()
+	{
+		// Create a shared additive particle material using the billboard shader.
+		// WhiteTexture means color comes entirely from vertex colors.
+		mParticleMaterial = scope MaterialBuilder("ParticleMat")
+			.Shader("billboard")
+			.VertexLayout(.PositionUVColor)
+			.Additive()
+			.Cull(.None)
+			.Texture("AlbedoMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Sampler("MainSampler", mRenderer.MaterialSystem.DefaultSampler)
+			.Build();
+
+		// --- Fire emitter (center) ---
+		{
+			let node = mScene.CreateChild("Fire");
+			node.Position = .(0, 0.5f, 0);
+			let emitter = node.CreateComponent<ParticleEmitter>();
+			emitter.EmissionRate = 100;
+			emitter.MaxParticles = 400;
+			emitter.MinLifetime = 0.5f;
+			emitter.MaxLifetime = 1.5f;
+			emitter.MinSpeed = 2.0f;
+			emitter.MaxSpeed = 6.0f;
+			emitter.MinSize = 0.6f;
+			emitter.MaxSize = 1.5f;
+			emitter.EndSizeScale = 0.0f;
+			emitter.EmissionDirection = .(0, 1, 0);
+			emitter.DirectionSpread = Math.PI_f / 4.0f;
+			emitter.Gravity = .Zero;
+			emitter.StartColor = BillboardSet.PackColor(1.0f, 0.9f, 0.3f, 1.0f);
+			emitter.EndColor = BillboardSet.PackColor(1.0f, 0.1f, 0.0f, 0.0f);
+			emitter.MinRotationSpeed = -2.0f;
+			emitter.MaxRotationSpeed = 2.0f;
+
+			let inst = new MaterialInstance(mParticleMaterial);
+			mMaterialInstances.Add(inst);
+			if (mRenderer.MaterialSystem.PrepareInstance(inst) case .Ok)
+				emitter.Material = inst;
+			emitter.Start();
+		}
+
+		// --- Fountain emitter (left-back) ---
+		{
+			let node = mScene.CreateChild("Fountain");
+			node.Position = .(-8, 0.5f, -8);
+			let emitter = node.CreateComponent<ParticleEmitter>();
+			emitter.EmissionRate = 40;
+			emitter.MaxParticles = 200;
+			emitter.MinLifetime = 1.0f;
+			emitter.MaxLifetime = 3.0f;
+			emitter.MinSpeed = 8.0f;
+			emitter.MaxSpeed = 15.0f;
+			emitter.MinSize = 0.1f;
+			emitter.MaxSize = 0.3f;
+			emitter.EndSizeScale = 0.5f;
+			emitter.EmissionDirection = .(0, 1, 0);
+			emitter.DirectionSpread = Math.PI_f / 6.0f;
+			emitter.Gravity = .(0, -9.81f, 0);
+			emitter.StartColor = BillboardSet.PackColor(0.2f, 0.8f, 1.0f, 1.0f);
+			emitter.EndColor = BillboardSet.PackColor(0.1f, 0.3f, 1.0f, 0.0f);
+
+			let inst = new MaterialInstance(mParticleMaterial);
+			mMaterialInstances.Add(inst);
+			if (mRenderer.MaterialSystem.PrepareInstance(inst) case .Ok)
+				emitter.Material = inst;
+			emitter.Start();
+		}
+
+		// --- Spark emitter (right-back) ---
+		{
+			let node = mScene.CreateChild("Sparks");
+			node.Position = .(8, 0.5f, 8);
+			let emitter = node.CreateComponent<ParticleEmitter>();
+			emitter.EmissionRate = 60;
+			emitter.MaxParticles = 150;
+			emitter.MinLifetime = 0.3f;
+			emitter.MaxLifetime = 1.0f;
+			emitter.MinSpeed = 5.0f;
+			emitter.MaxSpeed = 12.0f;
+			emitter.MinSize = 0.05f;
+			emitter.MaxSize = 0.15f;
+			emitter.EndSizeScale = 0.0f;
+			emitter.EmissionDirection = .(0, 1, 0);
+			emitter.DirectionSpread = Math.PI_f / 2.0f;
+			emitter.Gravity = .(0, -5.0f, 0);
+			emitter.StartColor = BillboardSet.PackColor(1.0f, 1.0f, 1.0f, 1.0f);
+			emitter.EndColor = BillboardSet.PackColor(1.0f, 0.5f, 0.1f, 0.0f);
+			emitter.MinRotationSpeed = -5.0f;
+			emitter.MaxRotationSpeed = 5.0f;
+
+			let inst = new MaterialInstance(mParticleMaterial);
+			mMaterialInstances.Add(inst);
+			if (mRenderer.MaterialSystem.PrepareInstance(inst) case .Ok)
+				emitter.Material = inst;
+			emitter.Start();
+		}
+	}
+
+	private void CreateSprite()
+	{
+		// Generate a checkerboard texture procedurally
+		let image = Image.CreateCheckerboard(128, Color(1.0f, 0.3f, 0.8f, 1.0f), Color(0.2f, 0.1f, 0.5f, 1.0f), 16);
+		defer delete image;
+
+		// Upload to GPU
+		var texDesc = TextureDescriptor.Texture2D(128, 128, .RGBA8Unorm, .Sampled | .CopyDst);
+		if (Device.CreateTexture(&texDesc) case .Ok(let tex))
+			mSpriteTexture = tex;
+		else
+			return;
+
+		var layout = TextureDataLayout() { Offset = 0, BytesPerRow = 128 * 4, RowsPerImage = 128 };
+		var writeSize = Extent3D() { Width = 128, Height = 128, Depth = 1 };
+		Device.Queue.WriteTexture(mSpriteTexture, image.Data, &layout, &writeSize);
+
+		var viewDesc = TextureViewDescriptor() { Format = .RGBA8Unorm };
+		if (Device.CreateTextureView(mSpriteTexture, &viewDesc) case .Ok(let view))
+			mSpriteTextureView = view;
+		else
+			return;
+
+		// Create sprite material
+		mSpriteMaterial = Materials.CreateSprite("SpriteMat",
+			texture: mSpriteTextureView,
+			sampler: mRenderer.MaterialSystem.DefaultSampler);
+
+		// Create sprite node and component
+		let spriteNode = mScene.CreateChild("Sprite");
+		spriteNode.Position = .(0, 3, 0);
+		let sprite = spriteNode.CreateComponent<Sprite2D>();
+		sprite.Size = .(3.0f, 3.0f);
+		sprite.DrawMode = .World;
+
+		let spriteInst = new MaterialInstance(mSpriteMaterial);
+		mMaterialInstances.Add(spriteInst);
+		if (mRenderer.MaterialSystem.PrepareInstance(spriteInst) case .Ok)
+			sprite.Material = spriteInst;
+	}
+
 	private Result<MaterialInstance> CreateMaterialInstance(Vector4 baseColor, float metallic, float roughness)
 	{
 		let inst = new MaterialInstance(mPbrMaterial);
@@ -290,8 +451,36 @@ class DemoApp : SedulousApp
 			pos += Vector3.Transform(.(-1, 0, 0), rotation) * speed;
 		if (kb.IsKeyDown(.D))
 			pos += Vector3.Transform(.(1, 0, 0), rotation) * speed;
+		if (kb.IsKeyDown(.E))
+			pos += Vector3(0, 1, 0) * speed;
+		if (kb.IsKeyDown(.Q))
+			pos += Vector3(0, -1, 0) * speed;
 
 		mCameraNode.Position = pos;
+
+		// DEBUG: Draw bounding boxes for particles and sprite
+		if (mDebugRenderer != null)
+		{
+			mDebugRenderer.BeginFrame();
+
+			let octree = mScene.GetComponent<Octree>();
+			if (octree != null)
+			{
+				let drawables = scope List<Drawable>();
+				octree.QueryBox(BoundingBox(Vector3(-500), Vector3(500)), drawables, .Geometry);
+				for (let d in drawables)
+				{
+					if (d is Sprite2D)
+					{
+						// World bounding box in yellow (no depth test = always visible)
+						mDebugRenderer.AddBoundingBox(d.WorldBoundingBox, Color.Yellow, depthTest: false);
+						// Node position cross in cyan
+						if (d.Node != null)
+							mDebugRenderer.AddCross(d.Node.WorldPosition, 0.5f, Color.Cyan, depthTest: false);
+					}
+				}
+			}
+		}
 
 		// DEBUG: Press P to dump frustum culling diagnostics
 		if (kb.IsKeyPressed(.P))
@@ -406,7 +595,27 @@ class DemoApp : SedulousApp
 		}
 
 		// mMaterialInstances, mMeshes cleaned up by field destructors
-		// mPbrMaterial must be deleted after instances
+		// Material templates must be deleted after instances
+		if (mParticleMaterial != null)
+		{
+			delete mParticleMaterial;
+			mParticleMaterial = null;
+		}
+		if (mSpriteMaterial != null)
+		{
+			delete mSpriteMaterial;
+			mSpriteMaterial = null;
+		}
+		if (mSpriteTextureView != null)
+		{
+			delete mSpriteTextureView;
+			mSpriteTextureView = null;
+		}
+		if (mSpriteTexture != null)
+		{
+			delete mSpriteTexture;
+			mSpriteTexture = null;
+		}
 		if (mPbrMaterial != null)
 		{
 			delete mPbrMaterial;

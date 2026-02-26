@@ -165,7 +165,11 @@ public class ParticleEmitter : BillboardSet
 	// ===== Control =====
 
 	/// Starts emitting particles.
-	public void Start() { mEmitting = true; }
+	public void Start()
+	{
+		mEmitting = true;
+		UpdateConservativeBounds();
+	}
 
 	/// Stops emitting (existing particles continue to live).
 	public void Stop() { mEmitting = false; }
@@ -237,6 +241,11 @@ public class ParticleEmitter : BillboardSet
 
 		// Base generates camera-facing geometry and submits batches
 		base.UpdateBatches(frameInfo);
+
+		// Restore conservative bounds — base.UpdateBatches calls UpdateBillboardBounds
+		// which shrinks to a tight fit around current particles. That tight box may fail
+		// the frustum test next frame, permanently culling the emitter.
+		UpdateConservativeBounds();
 	}
 
 	// ===== Private =====
@@ -311,5 +320,20 @@ public class ParticleEmitter : BillboardSet
 			   ((uint32)Lerp(ag, bg, t) << 8) |
 			   ((uint32)Lerp(ab, bb2, t) << 16) |
 			   ((uint32)Lerp(aa, ba, t) << 24);
+	}
+
+	/// Sets a conservative bounding box based on emission parameters.
+	/// This ensures the emitter is never frustum-culled before particles
+	/// have been simulated (which only happens in UpdateBatches for visible drawables).
+	private void UpdateConservativeBounds()
+	{
+		// Max distance a particle can travel from emission speed
+		let maxExtent = mMaxSpeed * mMaxLifetime;
+		// Additional distance from gravity acceleration: 0.5 * |g| * t²
+		let gravityExtent = 0.5f * mGravity.Length() * mMaxLifetime * mMaxLifetime;
+		// Add the max particle size for billboard expansion
+		let sizeExtent = mMaxSize;
+		let total = maxExtent + gravityExtent + sizeExtent;
+		BoundingBox = .(Vector3(-total), Vector3(total));
 	}
 }

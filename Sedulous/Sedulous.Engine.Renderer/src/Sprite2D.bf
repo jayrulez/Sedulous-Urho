@@ -24,13 +24,14 @@ public enum SpriteDrawMode
 [EngineComponent("Rendering")]
 public class Sprite2D : Drawable
 {
+	private const int32 MAX_FRAMES = FrameConfig.MAX_FRAMES_IN_FLIGHT;
 	private MaterialInstance mMaterial;
-	private IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
-	private IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
+	private IBuffer[MAX_FRAMES] mVertexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private uint8[] mVertexData ~ delete _;
 	private uint8[] mIndexData ~ delete _;
 	private bool mBuffersDirty = true;
-	private bool mBuffersAllocated = false;
+	private bool[MAX_FRAMES] mBuffersAllocated;
 
 	// Sprite properties
 	private Vector2 mSize = .(1.0f, 1.0f);
@@ -150,8 +151,8 @@ public class Sprite2D : Drawable
 			Distance = distance,
 			StartIndex = 0,
 			IndexCount = 6,
-			VertexBuffer = mVertexBuffer,
-			IndexBuffer = mIndexBuffer,
+			VertexBuffer = null, // Patched by UploadToGPU with per-frame buffer
+			IndexBuffer = null,
 			IndexBufferFormat = .UInt16,
 			Material = mMaterial,
 			Drawable = this
@@ -160,35 +161,44 @@ public class Sprite2D : Drawable
 	}
 
 	/// Uploads sprite geometry to the GPU.
-	public Result<void> UploadToGPU(IDevice device)
+	/// Uses per-frame buffers to avoid destroying buffers still in use by the GPU.
+	public Result<void> UploadToGPU(IDevice device, int32 frameIndex)
 	{
+		let fi = frameIndex;
 		let vertexDataSize = (uint64)(4 * VERTEX_SIZE);
 		let indexDataSize = (uint64)(6 * 2); // UInt16
 
-		if (!mBuffersAllocated)
+		if (!mBuffersAllocated[fi])
 		{
-			if (mVertexBuffer != null) { delete mVertexBuffer; mVertexBuffer = null; }
-			if (mIndexBuffer != null) { delete mIndexBuffer; mIndexBuffer = null; }
+			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
 
 			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
-				mVertexBuffer = vb;
+				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
 			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
-				mIndexBuffer = ib;
+				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mBuffersAllocated = true;
+			mBuffersAllocated[fi] = true;
 		}
 
 		if (mVertexData != null && vertexDataSize > 0)
-			device.Queue.WriteBuffer(mVertexBuffer, 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
+			device.Queue.WriteBuffer(mVertexBuffers[fi], 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
 		if (mIndexData != null && indexDataSize > 0)
-			device.Queue.WriteBuffer(mIndexBuffer, 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+			device.Queue.WriteBuffer(mIndexBuffers[fi], 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+
+		// Patch batch entries with current frame's buffer pointers
+		for (int32 i = 0; i < MutableBatches.Count; i++)
+		{
+			MutableBatches[i].VertexBuffer = mVertexBuffers[fi];
+			MutableBatches[i].IndexBuffer = mIndexBuffers[fi];
+		}
 
 		mBuffersDirty = false;
 		return .Ok;
@@ -289,7 +299,10 @@ public class Sprite2D : Drawable
 
 	private void UpdateLocalBounds()
 	{
-		let half = Vector3(mSize.X * 0.5f, mSize.Y * 0.5f, 0.01f);
+		// Use the larger of X/Y half-size for Z extent since the sprite
+		// is billboarded and can face any direction relative to its node.
+		let maxHalf = Math.Max(mSize.X, mSize.Y) * 0.5f;
+		let half = Vector3(maxHalf, maxHalf, maxHalf);
 		BoundingBox = .(-half, half);
 	}
 

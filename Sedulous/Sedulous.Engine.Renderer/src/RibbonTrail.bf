@@ -36,12 +36,13 @@ struct TrailPoint
 [EngineComponent("Rendering")]
 public class RibbonTrail : Drawable
 {
+	private const int32 MAX_FRAMES = FrameConfig.MAX_FRAMES_IN_FLIGHT;
 	private List<TrailPoint> mPoints = new .() ~ delete _;
-	private IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
-	private IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
+	private IBuffer[MAX_FRAMES] mVertexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private uint8[] mVertexData ~ delete _;
 	private uint8[] mIndexData ~ delete _;
-	private int32 mLastVertexCount = 0;
+	private int32[MAX_FRAMES] mLastVertexCounts;
 	private MaterialInstance mMaterial;
 	private Vector3 mPreviousPosition;
 	private bool mFirstUpdate = true;
@@ -215,8 +216,8 @@ public class RibbonTrail : Drawable
 			Distance = distance,
 			StartIndex = 0,
 			IndexCount = segmentCount * 6,
-			VertexBuffer = mVertexBuffer,
-			IndexBuffer = mIndexBuffer,
+			VertexBuffer = null, // Patched by UploadToGPU with per-frame buffer
+			IndexBuffer = null,
 			IndexBufferFormat = .UInt16,
 			Material = mMaterial,
 			Drawable = this
@@ -225,41 +226,50 @@ public class RibbonTrail : Drawable
 	}
 
 	/// Uploads trail geometry to the GPU.
-	public Result<void> UploadToGPU(IDevice device)
+	/// Uses per-frame buffers to avoid destroying buffers still in use by the GPU.
+	public Result<void> UploadToGPU(IDevice device, int32 frameIndex)
 	{
 		if (mPoints.Count < 2)
 			return .Ok;
 
+		let fi = frameIndex;
 		let vertexCount = (int32)mPoints.Count * 2;
 		let segmentCount = (int32)mPoints.Count - 1;
 		let vertexDataSize = (uint64)(vertexCount * VERTEX_SIZE);
 		let indexDataSize = (uint64)(segmentCount * 6 * 2); // UInt16
 
-		// Recreate buffers if vertex count changed
-		if (mVertexBuffer == null || mLastVertexCount != vertexCount)
+		// Recreate this frame's buffers if vertex count changed
+		if (mVertexBuffers[fi] == null || mLastVertexCounts[fi] != vertexCount)
 		{
-			if (mVertexBuffer != null) { delete mVertexBuffer; mVertexBuffer = null; }
-			if (mIndexBuffer != null) { delete mIndexBuffer; mIndexBuffer = null; }
+			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
 
 			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
-				mVertexBuffer = vb;
+				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
 			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
-				mIndexBuffer = ib;
+				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mLastVertexCount = vertexCount;
+			mLastVertexCounts[fi] = vertexCount;
 		}
 
 		if (mVertexData != null && vertexDataSize > 0)
-			device.Queue.WriteBuffer(mVertexBuffer, 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
+			device.Queue.WriteBuffer(mVertexBuffers[fi], 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
 		if (mIndexData != null && indexDataSize > 0)
-			device.Queue.WriteBuffer(mIndexBuffer, 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+			device.Queue.WriteBuffer(mIndexBuffers[fi], 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+
+		// Patch batch entries with current frame's buffer pointers
+		for (int32 i = 0; i < MutableBatches.Count; i++)
+		{
+			MutableBatches[i].VertexBuffer = mVertexBuffers[fi];
+			MutableBatches[i].IndexBuffer = mIndexBuffers[fi];
+		}
 
 		return .Ok;
 	}

@@ -112,6 +112,11 @@ class MaterialInstance : RefCounted, IDisposable
 	{
 		mMaterial = material;
 
+		// Inherit blend mode from the material's pipeline config so that
+		// CollectAndSortBatches correctly classifies this instance as
+		// opaque or transparent.
+		mBlendMode = material.PipelineConfig.BlendMode;
+
 		// Allocate override buffer if material has uniforms
 		if (material.UniformDataSize > 0)
 		{

@@ -44,9 +44,10 @@ public class Terrain : Drawable
 	private int32 mPatchesX = 0;
 	private int32 mPatchesZ = 0;
 
-	// GPU buffers
-	private IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
-	private IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
+	// GPU buffers (per-frame to avoid destroying buffers still in use by previous frames)
+	private const int32 MAX_FRAMES = FrameConfig.MAX_FRAMES_IN_FLIGHT;
+	private IBuffer[MAX_FRAMES] mVertexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private uint8[] mVertexData ~ delete _;
 	private uint8[] mIndexData ~ delete _;
 	private bool mBuffersDirty = true;
@@ -211,8 +212,8 @@ public class Terrain : Drawable
 				Distance = distance,
 				StartIndex = patch.StartIndex,
 				IndexCount = patch.IndexCount,
-				VertexBuffer = mVertexBuffer,
-				IndexBuffer = mIndexBuffer,
+				VertexBuffer = null, // Patched by UploadToGPU with per-frame buffer
+				IndexBuffer = null,
 				IndexBufferFormat = .UInt32,
 				Material = mMaterial,
 				Drawable = this
@@ -224,7 +225,8 @@ public class Terrain : Drawable
 	// ===== GPU Upload =====
 
 	/// Uploads terrain geometry to the GPU.
-	public Result<void> UploadToGPU(IDevice device)
+	/// Uses per-frame buffers to avoid destroying buffers still in use by the GPU.
+	public Result<void> UploadToGPU(IDevice device, int32 frameIndex)
 	{
 		if (mHeightData == null)
 			return .Ok;
@@ -235,29 +237,37 @@ public class Terrain : Drawable
 		if (mTotalVertices == 0 || mTotalIndices == 0)
 			return .Ok;
 
+		let fi = frameIndex;
 		let vertexDataSize = (uint64)(mTotalVertices * VERTEX_SIZE);
 		let indexDataSize = (uint64)(mTotalIndices * 4); // UInt32
 
-		// Recreate buffers
-		if (mVertexBuffer != null) { delete mVertexBuffer; mVertexBuffer = null; }
-		if (mIndexBuffer != null) { delete mIndexBuffer; mIndexBuffer = null; }
+		// Recreate this frame's buffers
+		if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
+		if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
 
 		BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
 		if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
-			mVertexBuffer = vb;
+			mVertexBuffers[fi] = vb;
 		else
 			return .Err;
 
 		BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
 		if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
-			mIndexBuffer = ib;
+			mIndexBuffers[fi] = ib;
 		else
 			return .Err;
 
 		if (mVertexData != null && vertexDataSize > 0)
-			device.Queue.WriteBuffer(mVertexBuffer, 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
+			device.Queue.WriteBuffer(mVertexBuffers[fi], 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
 		if (mIndexData != null && indexDataSize > 0)
-			device.Queue.WriteBuffer(mIndexBuffer, 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+			device.Queue.WriteBuffer(mIndexBuffers[fi], 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+
+		// Patch batch entries with current frame's buffer pointers
+		for (int32 i = 0; i < MutableBatches.Count; i++)
+		{
+			MutableBatches[i].VertexBuffer = mVertexBuffers[fi];
+			MutableBatches[i].IndexBuffer = mIndexBuffers[fi];
+		}
 
 		mBuffersDirty = false;
 		return .Ok;

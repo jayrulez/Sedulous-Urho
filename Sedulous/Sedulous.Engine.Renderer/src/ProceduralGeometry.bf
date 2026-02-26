@@ -54,10 +54,11 @@ public class ProceduralGeometry : Drawable
 	private List<ProceduralVertex> mVertices = new .() ~ delete _;
 	private List<uint32> mIndices = new .() ~ delete _;
 	private List<ProceduralSubGeometry> mSubGeometries = new .() ~ delete _;
-	private IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
-	private IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
-	private int32 mLastVertexCount = 0;
-	private int32 mLastIndexCount = 0;
+	private const int32 MAX_FRAMES = FrameConfig.MAX_FRAMES_IN_FLIGHT;
+	private IBuffer[MAX_FRAMES] mVertexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private int32[MAX_FRAMES] mLastVertexCounts;
+	private int32[MAX_FRAMES] mLastIndexCounts;
 	private bool mDirty = true;
 	private MaterialInstance mDefaultMaterial;
 
@@ -232,8 +233,8 @@ public class ProceduralGeometry : Drawable
 				Distance = distance,
 				StartIndex = sub.StartIndex,
 				IndexCount = sub.IndexCount,
-				VertexBuffer = mVertexBuffer,
-				IndexBuffer = mIndexBuffer,
+				VertexBuffer = null, // Patched by UploadToGPU with per-frame buffer
+				IndexBuffer = null,
 				IndexBufferFormat = .UInt32,
 				Material = sub.Material != null ? sub.Material : mDefaultMaterial,
 				Drawable = this
@@ -243,36 +244,38 @@ public class ProceduralGeometry : Drawable
 	}
 
 	/// Uploads procedural geometry to the GPU.
-	public Result<void> UploadToGPU(IDevice device)
+	/// Uses per-frame buffers to avoid destroying buffers still in use by the GPU.
+	public Result<void> UploadToGPU(IDevice device, int32 frameIndex)
 	{
 		if (mVertices.Count == 0 || mIndices.Count == 0)
 			return .Ok;
 
+		let fi = frameIndex;
 		let vertexCount = (int32)mVertices.Count;
 		let indexCount = (int32)mIndices.Count;
 		let vertexDataSize = (uint64)(vertexCount * VERTEX_SIZE);
 		let indexDataSize = (uint64)(indexCount * 4); // UInt32
 
-		// Recreate buffers if size changed
-		if (mVertexBuffer == null || mLastVertexCount != vertexCount || mLastIndexCount != indexCount)
+		// Recreate this frame's buffers if size changed
+		if (mVertexBuffers[fi] == null || mLastVertexCounts[fi] != vertexCount || mLastIndexCounts[fi] != indexCount)
 		{
-			if (mVertexBuffer != null) { delete mVertexBuffer; mVertexBuffer = null; }
-			if (mIndexBuffer != null) { delete mIndexBuffer; mIndexBuffer = null; }
+			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
 
 			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
-				mVertexBuffer = vb;
+				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
 			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
-				mIndexBuffer = ib;
+				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mLastVertexCount = vertexCount;
-			mLastIndexCount = indexCount;
+			mLastVertexCounts[fi] = vertexCount;
+			mLastIndexCounts[fi] = indexCount;
 		}
 
 		// Build vertex data
@@ -289,11 +292,18 @@ public class ProceduralGeometry : Drawable
 			*(uint32*)&vertexBytes[offset + 32] = v.Color;
 		}
 
-		device.Queue.WriteBuffer(mVertexBuffer, 0, Span<uint8>(&vertexBytes[0], (int)vertexDataSize));
+		device.Queue.WriteBuffer(mVertexBuffers[fi], 0, Span<uint8>(&vertexBytes[0], (int)vertexDataSize));
 
 		// Index data can be written directly from the list's internal buffer
 		let indexPtr = mIndices.Ptr;
-		device.Queue.WriteBuffer(mIndexBuffer, 0, Span<uint8>((uint8*)indexPtr, (int)indexDataSize));
+		device.Queue.WriteBuffer(mIndexBuffers[fi], 0, Span<uint8>((uint8*)indexPtr, (int)indexDataSize));
+
+		// Patch batch entries with current frame's buffer pointers
+		for (int32 i = 0; i < MutableBatches.Count; i++)
+		{
+			MutableBatches[i].VertexBuffer = mVertexBuffers[fi];
+			MutableBatches[i].IndexBuffer = mIndexBuffers[fi];
+		}
 
 		mDirty = false;
 		return .Ok;

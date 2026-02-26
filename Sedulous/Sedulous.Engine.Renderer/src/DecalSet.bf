@@ -44,12 +44,13 @@ public class DecalSet : Drawable
 	private List<Decal> mDecals = new .() ~ delete _;
 	private int32 mMaxDecals = 64;
 
-	// GPU buffers
-	private IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
-	private IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
+	// GPU buffers (per-frame to avoid destroying buffers still in use by previous frames)
+	private const int32 MAX_FRAMES = FrameConfig.MAX_FRAMES_IN_FLIGHT;
+	private IBuffer[MAX_FRAMES] mVertexBuffers ~ { for (let b in _) if (b != null) delete b; };
+	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private uint8[] mVertexData ~ delete _;
 	private uint8[] mIndexData ~ delete _;
-	private int32 mLastEnabledCount = 0;
+	private int32[MAX_FRAMES] mLastEnabledCounts;
 	private bool mBuffersDirty = true;
 
 	// Material
@@ -221,8 +222,8 @@ public class DecalSet : Drawable
 			Distance = distance,
 			StartIndex = 0,
 			IndexCount = enabledCount * 6,
-			VertexBuffer = mVertexBuffer,
-			IndexBuffer = mIndexBuffer,
+			VertexBuffer = null, // Patched by UploadToGPU with per-frame buffer
+			IndexBuffer = null,
 			IndexBufferFormat = .UInt16,
 			Material = mMaterial,
 			Drawable = this
@@ -233,7 +234,8 @@ public class DecalSet : Drawable
 	// ===== GPU Upload =====
 
 	/// Uploads decal geometry to the GPU.
-	public Result<void> UploadToGPU(IDevice device)
+	/// Uses per-frame buffers to avoid destroying buffers still in use by the GPU.
+	public Result<void> UploadToGPU(IDevice device, int32 frameIndex)
 	{
 		int32 enabledCount = 0;
 		for (let d in mDecals)
@@ -242,34 +244,42 @@ public class DecalSet : Drawable
 		if (enabledCount == 0)
 			return .Ok;
 
+		let fi = frameIndex;
 		let vertexDataSize = (uint64)(enabledCount * 4 * VERTEX_SIZE);
 		let indexDataSize = (uint64)(enabledCount * 6 * 2); // UInt16
 
-		// Recreate buffers if count changed
-		if (mVertexBuffer == null || mLastEnabledCount != enabledCount)
+		// Recreate this frame's buffers if count changed
+		if (mVertexBuffers[fi] == null || mLastEnabledCounts[fi] != enabledCount)
 		{
-			if (mVertexBuffer != null) { delete mVertexBuffer; mVertexBuffer = null; }
-			if (mIndexBuffer != null) { delete mIndexBuffer; mIndexBuffer = null; }
+			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
 
 			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
-				mVertexBuffer = vb;
+				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
 			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
-				mIndexBuffer = ib;
+				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mLastEnabledCount = enabledCount;
+			mLastEnabledCounts[fi] = enabledCount;
 		}
 
 		if (mVertexData != null && vertexDataSize > 0)
-			device.Queue.WriteBuffer(mVertexBuffer, 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
+			device.Queue.WriteBuffer(mVertexBuffers[fi], 0, Span<uint8>(&mVertexData[0], (int)vertexDataSize));
 		if (mIndexData != null && indexDataSize > 0)
-			device.Queue.WriteBuffer(mIndexBuffer, 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+			device.Queue.WriteBuffer(mIndexBuffers[fi], 0, Span<uint8>(&mIndexData[0], (int)indexDataSize));
+
+		// Patch batch entries with current frame's buffer pointers
+		for (int32 i = 0; i < MutableBatches.Count; i++)
+		{
+			MutableBatches[i].VertexBuffer = mVertexBuffers[fi];
+			MutableBatches[i].IndexBuffer = mIndexBuffers[fi];
+		}
 
 		mBuffersDirty = false;
 		return .Ok;
