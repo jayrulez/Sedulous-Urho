@@ -8,6 +8,7 @@ using Sedulous.Shell.Input;
 using Sedulous.RHI;
 using Sedulous.Jobs;
 using Sedulous.Resources;
+using Sedulous.Profiler;
 
 namespace Sedulous.Engine.Core;
 
@@ -158,16 +159,20 @@ public class Engine
 		if (!mInitialized || mExiting)
 			return false;
 
+		SProfiler.BeginFrame();
+
 		float frameStartTime = (float)mStopwatch.Elapsed.TotalSeconds;
 
 		// --- Input ---
-		ProcessInput();
+		using (SProfiler.Begin("ProcessInput"))
+			ProcessInput();
 
 		// Check if shell requested exit
 		let shell = mContext.GetSubsystem<IShell>();
 		if (shell != null && !shell.IsRunning)
 		{
 			mExiting = true;
+			SProfiler.EndFrame();
 			return false;
 		}
 
@@ -179,45 +184,60 @@ public class Engine
 		mFrameNumber++;
 
 		// --- Frame Begin ---
-		mOnFrameBegin.[Friend]Invoke();
+		using (SProfiler.Begin("FrameBegin"))
+			mOnFrameBegin.[Friend]Invoke();
 
 		// --- Fixed Update ---
-		mFixedUpdateAccumulator += mDeltaTime;
-		int32 fixedSteps = 0;
-		while (mFixedUpdateAccumulator >= mFixedTimeStep && fixedSteps < mMaxFixedStepsPerFrame)
+		using (SProfiler.Begin("FixedUpdate"))
 		{
-			mOnFixedUpdate.[Friend]Invoke(mFixedTimeStep);
-			mFixedUpdateAccumulator -= mFixedTimeStep;
-			fixedSteps++;
+			mFixedUpdateAccumulator += mDeltaTime;
+			int32 fixedSteps = 0;
+			while (mFixedUpdateAccumulator >= mFixedTimeStep && fixedSteps < mMaxFixedStepsPerFrame)
+			{
+				mOnFixedUpdate.[Friend]Invoke(mFixedTimeStep);
+				mFixedUpdateAccumulator -= mFixedTimeStep;
+				fixedSteps++;
+			}
+			// Clamp accumulator to prevent spiral of death
+			if (mFixedUpdateAccumulator > mFixedTimeStep * 2)
+				mFixedUpdateAccumulator = mFixedTimeStep * 2;
 		}
-		// Clamp accumulator to prevent spiral of death
-		if (mFixedUpdateAccumulator > mFixedTimeStep * 2)
-			mFixedUpdateAccumulator = mFixedTimeStep * 2;
 
 		// --- Update ---
-		mOnUpdate.[Friend]Invoke(mDeltaTime);
+		using (SProfiler.Begin("Update"))
+			mOnUpdate.[Friend]Invoke(mDeltaTime);
 
 		// --- Post Update ---
-		mOnPostUpdate.[Friend]Invoke();
+		using (SProfiler.Begin("PostUpdate"))
+			mOnPostUpdate.[Friend]Invoke();
 
 		// --- Update Jobs ---
-		let jobSystem = mContext.GetSubsystem<JobSystem>();
-		if (jobSystem != null)
-			jobSystem.Update();
+		using (SProfiler.Begin("JobSystem"))
+		{
+			let jobSystem = mContext.GetSubsystem<JobSystem>();
+			if (jobSystem != null)
+				jobSystem.Update();
+		}
 
 		// --- Update Resources ---
-		let resourceSystem = mContext.GetSubsystem<ResourceSystem>();
-		if (resourceSystem != null)
-			resourceSystem.Update();
+		using (SProfiler.Begin("ResourceSystem"))
+		{
+			let resourceSystem = mContext.GetSubsystem<ResourceSystem>();
+			if (resourceSystem != null)
+				resourceSystem.Update();
+		}
 
 		// --- Render Update ---
-		mOnRenderUpdate.[Friend]Invoke();
+		using (SProfiler.Begin("RenderUpdate"))
+			mOnRenderUpdate.[Friend]Invoke();
 
 		// --- Post Render Update ---
-		mOnPostRenderUpdate.[Friend]Invoke();
+		using (SProfiler.Begin("PostRenderUpdate"))
+			mOnPostRenderUpdate.[Friend]Invoke();
 
 		// --- Frame End ---
-		mOnFrameEnd.[Friend]Invoke();
+		using (SProfiler.Begin("FrameEnd"))
+			mOnFrameEnd.[Friend]Invoke();
 
 		// --- Frame Pacing ---
 		if (mTargetFrameTime > 0)
@@ -231,6 +251,7 @@ public class Engine
 			}
 		}
 
+		SProfiler.EndFrame();
 		return true;
 	}
 

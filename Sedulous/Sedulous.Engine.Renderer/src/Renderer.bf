@@ -7,6 +7,7 @@ using Sedulous.RHI;
 using Sedulous.RenderGraph;
 using Sedulous.Shaders;
 using Sedulous.Materials;
+using Sedulous.Profiler;
 
 namespace Sedulous.Engine.Renderer;
 
@@ -100,6 +101,9 @@ public class Renderer
 	private int32[MAX_FRAMES_IN_FLIGHT] mInstanceBufferCapacities;
 	private const int32 MAX_INSTANCES_PER_DRAW = 256;
 	private const int32 INSTANCE_STRIDE = 64; // 4 x float4 = world matrix
+	// Deferred deletion for old buffers the GPU may still reference
+	private List<(IBuffer buffer, int32 frameQueued)> mPendingBufferDeletes = new .() ~ { for (var e in _) delete e.buffer; delete _; };
+	private int32 mDeferFrameCounter = 0;
 
 	// Dynamic uniform buffer alignment for shadow cascade slots (ceil(800/256)*256)
 	private const int32 SHADOW_FRAME_ALIGN = 1024;
@@ -142,7 +146,8 @@ public class Renderer
 	/// Initializes the renderer with a GPU device.
 	/// Must be called before any rendering occurs.
 	/// shaderPaths: directories containing shader source files.
-	public Result<void> Initialize(IDevice device, Span<StringView> shaderPaths = default)
+	/// shaderCachePath: optional path for shader disk cache (avoids recompilation across runs).
+	public Result<void> Initialize(IDevice device, Span<StringView> shaderPaths = default, StringView shaderCachePath = default)
 	{
 		if (device == null)
 			return .Err;
@@ -153,7 +158,7 @@ public class Renderer
 
 		// Initialize shader system
 		mShaderSystem = new ShaderSystem();
-		if (mShaderSystem.Initialize(device, shaderPaths) case .Err)
+		if (mShaderSystem.Initialize(device, shaderPaths, shaderCachePath) case .Err)
 		{
 			mLogger?.LogError("Failed to initialize shader system.");
 			return .Err;
@@ -178,7 +183,7 @@ public class Renderer
 		mDefaultZone.FogEnd = 1000.0f;
 
 		// Create shadow map atlas and comparison sampler (before bind groups)
-		mShadowMap = new ShadowMap(device, 2048);
+		mShadowMap = new ShadowMap(device, 4096);
 		if (mShadowMap.CreateAtlas() case .Err)
 			mLogger?.LogWarning("Failed to create shadow atlas. Shadows disabled.");
 
@@ -376,9 +381,19 @@ public class Renderer
 	///
 	public void Update(float timeStep)
 	{
+		using (SProfiler.Begin("Renderer.Update"))
+		{
 		mFrameNumber++;
 		mTotalTime += timeStep;
 		mCurrentFrameIndex = (int32)(mFrameNumber % MAX_FRAMES_IN_FLIGHT);
+
+		// Flush deferred buffer deletes that have aged past the in-flight window
+		mDeferFrameCounter++;
+		while (mPendingBufferDeletes.Count > 0 && mDeferFrameCounter - mPendingBufferDeletes[0].frameQueued >= FrameConfig.DELETION_DEFER_FRAMES)
+		{
+			delete mPendingBufferDeletes[0].buffer;
+			mPendingBufferDeletes.RemoveAt(0);
+		}
 
 		// Reset per-frame stats
 		mStatDrawCalls = 0;
@@ -407,7 +422,8 @@ public class Renderer
 			camera.FlipY = mDevice.FlipProjectionRequired;
 
 			// Step 1: Process pending octree updates (moved drawables)
-			octree.Update();
+			using (SProfiler.Begin("Octree.Update"))
+				octree.Update();
 
 			// Step 2: Update camera aspect ratio from viewport
 			if (camera.AutoAspectRatio)
@@ -423,13 +439,16 @@ public class Renderer
 			let frustum = camera.Frustum;
 			let cameraPos = camera.Node != null ? camera.Node.WorldPosition : Vector3.Zero;
 
-			mVisibleGeometry.Clear();
-			mVisibleLights.Clear();
-			mVisibleZones.Clear();
+			using (SProfiler.Begin("FrustumCull"))
+			{
+				mVisibleGeometry.Clear();
+				mVisibleLights.Clear();
+				mVisibleZones.Clear();
 
-			octree.QueryFrustum(frustum, mVisibleGeometry, .Geometry, camera.ViewMask);
-			octree.QueryFrustum(frustum, mVisibleLights, .Light, camera.ViewMask);
-			octree.QueryFrustum(frustum, mVisibleZones, .Zone, camera.ViewMask);
+				octree.QueryFrustum(frustum, mVisibleGeometry, .Geometry, camera.ViewMask);
+				octree.QueryFrustum(frustum, mVisibleLights, .Light, camera.ViewMask);
+				octree.QueryFrustum(frustum, mVisibleZones, .Zone, camera.ViewMask);
+			}
 
 			// Step 4: Distance culling and zone assignment
 			FrameInfo frameInfo = .()
@@ -442,17 +461,27 @@ public class Renderer
 			};
 			GetViewportDimensions(viewport, out frameInfo.ViewportWidth, out frameInfo.ViewportHeight);
 
-			ProcessVisibleDrawables(mVisibleGeometry, cameraPos, frameInfo);
+			using (SProfiler.Begin("ProcessDrawables"))
+				ProcessVisibleDrawables(mVisibleGeometry, cameraPos, frameInfo);
 
 			// Step 4b: Upload dynamic geometry vertex data to GPU.
 			// Must happen after UpdateBatches (which builds CPU geometry) but before
 			// CollectAndSortBatches (which copies SourceBatch structs by value).
 			// UploadToGPU may recreate GPU buffers and patches MutableBatches with
 			// the new buffer pointers so the collected copies are correct.
-			UploadBillboardBuffers();
-			UploadTerrainBuffers();
-			UploadDecalBuffers();
-			UploadDynamicGeometryBuffers();
+			using (SProfiler.Begin("UploadGeometry"))
+			{
+				using (SProfiler.Begin("StaticModels"))
+					UploadStaticModelBuffers();
+				using (SProfiler.Begin("Billboards"))
+					UploadBillboardBuffers();
+				using (SProfiler.Begin("Terrain"))
+					UploadTerrainBuffers();
+				using (SProfiler.Begin("Decals"))
+					UploadDecalBuffers();
+				using (SProfiler.Begin("DynamicGeo"))
+					UploadDynamicGeometryBuffers();
+			}
 
 			// Step 5: Collect light list
 			mLightList.Clear();
@@ -463,7 +492,8 @@ public class Renderer
 			}
 
 			// Step 6: Collect and sort batches
-			CollectAndSortBatches(mVisibleGeometry, cameraPos, frameInfo);
+			using (SProfiler.Begin("CollectSortBatches"))
+				CollectAndSortBatches(mVisibleGeometry, cameraPos, frameInfo);
 
 			// Capture per-frame statistics
 			mStatVisibleGeometry = (int32)mVisibleGeometry.Count;
@@ -473,6 +503,7 @@ public class Renderer
 		}
 
 		mLastUpdateFrame = mFrameNumber;
+		} // Profiler: Renderer.Update
 	}
 
 	// ===== Rendering =====
@@ -504,6 +535,8 @@ public class Renderer
 	/// presenting the final result to the swap chain.
 	public void Render(ISwapChain swapChain)
 	{
+		using (SProfiler.Begin("Renderer.Render"))
+		{
 		if (mDevice == null || mRenderGraph == null)
 			return;
 
@@ -512,8 +545,11 @@ public class Renderer
 			return;
 
 		// Acquire next swapchain image — waits for in-flight fence (GPU done with this slot)
-		if (swapChain.AcquireNextImage() case .Err)
-			return;
+		using (SProfiler.Begin("AcquireImage"))
+		{
+			if (swapChain.AcquireNextImage() case .Err)
+				return;
+		}
 
 		let frameIndex = (int)swapChain.CurrentFrameIndex;
 		mCurrentFrameIndex = (int32)frameIndex;
@@ -536,7 +572,9 @@ public class Renderer
 		}
 
 		// Present the rendered image
-		swapChain.Present();
+		using (SProfiler.Begin("Present"))
+			swapChain.Present();
+		} // Profiler: Renderer.Render
 	}
 
 	// ===== Private: Viewport Rendering =====
@@ -544,6 +582,8 @@ public class Renderer
 	/// Renders a single viewport by building and executing its render graph.
 	private void RenderViewport(Viewport viewport, ISwapChain swapChain = null, int frameIndex = 0)
 	{
+		using (SProfiler.Begin("RenderViewport"))
+		{
 		mRenderGraph.Reset();
 
 		// Set current color format from swap chain (used when creating pipelines)
@@ -557,20 +597,24 @@ public class Renderer
 		let zone = FindBestZone(cameraPos) ?? mDefaultZone;
 
 		// Compute shadow cascades for the first directional shadow-casting light
-		ComputeShadowCascades(camera);
+		using (SProfiler.Begin("ShadowCascades"))
+			ComputeShadowCascades(camera);
 
-		// Upload per-cascade shadow VP matrices to the shadow dynamic uniform buffer
-		UploadShadowUniforms();
-
-		// Upload per-frame uniform data (camera, lights, zone, shadow matrices)
-		UploadFrameUniforms(camera, zone, cameraPos);
-
-		// Upload per-object uniform data (world transforms for all batches)
-		UploadObjectUniforms(mOpaqueBatches, 0);
-		UploadObjectUniforms(mTransparentBatches, (int32)mOpaqueBatches.Count);
-
-		// Upload bone matrices for visible animated models
-		UploadBoneMatrices();
+		// Upload uniform data
+		using (SProfiler.Begin("UploadUniforms"))
+		{
+			using (SProfiler.Begin("ShadowUniforms"))
+				UploadShadowUniforms();
+			using (SProfiler.Begin("FrameUniforms"))
+				UploadFrameUniforms(camera, zone, cameraPos);
+			using (SProfiler.Begin("ObjectUniforms"))
+			{
+				UploadObjectUniforms(mOpaqueBatches, 0);
+				UploadObjectUniforms(mTransparentBatches, (int32)mOpaqueBatches.Count);
+			}
+			using (SProfiler.Begin("BoneMatrices"))
+				UploadBoneMatrices();
+		}
 
 		// Dynamic geometry (billboard, terrain, decal, ribbon, etc.) already uploaded
 		// in Update() before batch collection.
@@ -683,12 +727,20 @@ public class Renderer
 			// Pre-resolve shadow pipelines for Mesh (48 bytes) and MeshNoTangent (32 bytes) strides
 			IRenderPipeline shadowPipelineMesh = null;
 			IRenderPipeline shadowPipelineNoTangent = null;
+			IRenderPipeline shadowPipelineSkinned = null;
 			if (mPipelineCache.GetOrCreate(MakeShadowConfig(.Mesh), mEmptyBindGroupLayout,
 				mShadowFrameBindGroupLayout, mObjectBindGroupLayout) case .Ok(let meshPl))
 				shadowPipelineMesh = meshPl;
 			if (mPipelineCache.GetOrCreate(MakeShadowConfig(.MeshNoTangent), mEmptyBindGroupLayout,
 				mShadowFrameBindGroupLayout, mObjectBindGroupLayout) case .Ok(let noTangentPl))
 				shadowPipelineNoTangent = noTangentPl;
+
+			// Skinned shadow pipeline: SkinnedMesh layout + Skinned shader flag + bone bind group at slot 3
+			var skinnedShadowCfg = MakeShadowConfig(.SkinnedMesh);
+			skinnedShadowCfg.ShaderFlags |= .Skinned;
+			if (mPipelineCache.GetOrCreate(skinnedShadowCfg, mEmptyBindGroupLayout,
+				mShadowFrameBindGroupLayout, mObjectBindGroupLayout, mBoneBindGroupLayout) case .Ok(let skinnedPl))
+				shadowPipelineSkinned = skinnedPl;
 
 			mRenderGraph.AddRasterPass("ShadowPass",
 				new [=shadowAtlas] (builder) => {
@@ -699,9 +751,15 @@ public class Renderer
 					if (shadowPipelineMesh == null)
 						return;
 
+					// Bind default pipeline first — descriptor sets bound before a pipeline
+					// may be invalidated when the first pipeline is set
+					encoder.SetPipeline(shadowPipelineMesh);
+
 					// Bind empty material at slot 0 (shadow shader uses no material bindings)
 					if (mEmptyBindGroup != null)
 						encoder.SetBindGroup(0, mEmptyBindGroup);
+
+					IRenderPipeline lastShadowPipeline = shadowPipelineMesh;
 
 					for (int32 c = 0; c < cascadeCount; c++)
 					{
@@ -718,13 +776,18 @@ public class Renderer
 						}
 
 						// Draw all opaque shadow casters, selecting the correct shadow pipeline per vertex layout
-						IRenderPipeline lastShadowPipeline = null;
 						int32 idx = 0;
 						for (let batch in mOpaqueBatches)
 						{
+							let isSkinned = batch.BoneMatrixBuffer != null;
+
 							// Determine the correct shadow pipeline from the batch's vertex layout
 							var shadowPl = shadowPipelineMesh; // default
-							if (batch.Material != null && batch.Material.Material != null)
+							if (isSkinned)
+							{
+								shadowPl = shadowPipelineSkinned;
+							}
+							else if (batch.Material != null && batch.Material.Material != null)
 							{
 								let batchLayout = batch.Material.Material.PipelineConfig.VertexLayout;
 								if (batchLayout == .MeshNoTangent)
@@ -732,10 +795,20 @@ public class Renderer
 							}
 
 							// Only switch pipeline when the layout changes (minimize state changes)
-							if (shadowPl != lastShadowPipeline)
+							if (shadowPl != lastShadowPipeline && shadowPl != null)
 							{
 								encoder.SetPipeline(shadowPl);
 								lastShadowPipeline = shadowPl;
+							}
+
+							// Bind bone matrices at slot 3 for skinned meshes
+							if (isSkinned && batch.Drawable != null)
+							{
+								if (let animModel = batch.Drawable as AnimatedModel)
+								{
+									if (animModel.BoneBindGroup != null)
+										encoder.SetBindGroup(3, animModel.BoneBindGroup);
+								}
 							}
 
 							DrawShadowBatch(encoder, batch, idx);
@@ -845,17 +918,23 @@ public class Renderer
 		}
 
 		// Compile and execute
-		if (mRenderGraph.Compile(mDevice) case .Err)
+		using (SProfiler.Begin("RenderGraph.Compile"))
 		{
-			mLogger?.LogError("Failed to compile render graph.");
-			return;
+			if (mRenderGraph.Compile(mDevice) case .Err)
+			{
+				mLogger?.LogError("Failed to compile render graph.");
+				return;
+			}
 		}
 
 		ICommandBuffer cmdBuffer = null;
-		if (swapChain != null)
-			cmdBuffer = mRenderGraph.Execute(mDevice, swapChain);
-		else
-			cmdBuffer = mRenderGraph.Execute(mDevice);
+		using (SProfiler.Begin("RenderGraph.Execute"))
+		{
+			if (swapChain != null)
+				cmdBuffer = mRenderGraph.Execute(mDevice, swapChain);
+			else
+				cmdBuffer = mRenderGraph.Execute(mDevice);
+		}
 
 		// Store command buffer for deferred deletion (GPU still using it)
 		if (cmdBuffer != null)
@@ -864,6 +943,7 @@ public class Renderer
 				delete mCommandBuffers[frameIndex];
 			mCommandBuffers[frameIndex] = cmdBuffer;
 		}
+		} // Profiler: RenderViewport
 	}
 
 	// ===== Private: Draw =====
@@ -872,9 +952,12 @@ public class Renderer
 	/// objectIndex: index into the per-object dynamic uniform buffer.
 	private void DrawBatch(IRenderPassEncoder encoder, SourceBatch batch, int32 objectIndex)
 	{
-		if (batch.VertexBuffer == null || batch.IndexBuffer == null)
+		if (batch.VertexBuffer == null)
 			return;
-		if (batch.IndexCount <= 0)
+		let isIndexed = batch.IndexBuffer != null;
+		if (isIndexed && batch.IndexCount <= 0)
+			return;
+		if (!isIndexed && batch.VertexCount <= 0)
 			return;
 		if (batch.Material == null || batch.Material.Material == null)
 			return;
@@ -941,8 +1024,15 @@ public class Renderer
 		}
 
 		encoder.SetVertexBuffer(0, batch.VertexBuffer);
-		encoder.SetIndexBuffer(batch.IndexBuffer, batch.IndexBufferFormat);
-		encoder.DrawIndexed((uint32)batch.IndexCount, 1, (uint32)batch.StartIndex, 0, 0);
+		if (isIndexed)
+		{
+			encoder.SetIndexBuffer(batch.IndexBuffer, batch.IndexBufferFormat);
+			encoder.DrawIndexed((uint32)batch.IndexCount, 1, (uint32)batch.StartIndex, 0, 0);
+		}
+		else
+		{
+			encoder.Draw((uint32)batch.VertexCount, 1, (uint32)batch.StartIndex, 0);
+		}
 		mStatDrawCalls++;
 	}
 
@@ -951,9 +1041,12 @@ public class Renderer
 	/// This method only binds per-object uniforms (slot 2) and issues the draw call.
 	private void DrawShadowBatch(IRenderPassEncoder encoder, SourceBatch batch, int32 objectIndex)
 	{
-		if (batch.VertexBuffer == null || batch.IndexBuffer == null)
+		if (batch.VertexBuffer == null)
 			return;
-		if (batch.IndexCount <= 0)
+		let isIndexed = batch.IndexBuffer != null;
+		if (isIndexed && batch.IndexCount <= 0)
+			return;
+		if (!isIndexed && batch.VertexCount <= 0)
 			return;
 
 		// Skip non-shadow-casting drawables
@@ -968,8 +1061,15 @@ public class Renderer
 		}
 
 		encoder.SetVertexBuffer(0, batch.VertexBuffer);
-		encoder.SetIndexBuffer(batch.IndexBuffer, batch.IndexBufferFormat);
-		encoder.DrawIndexed((uint32)batch.IndexCount, 1, (uint32)batch.StartIndex, 0, 0);
+		if (isIndexed)
+		{
+			encoder.SetIndexBuffer(batch.IndexBuffer, batch.IndexBufferFormat);
+			encoder.DrawIndexed((uint32)batch.IndexCount, 1, (uint32)batch.StartIndex, 0, 0);
+		}
+		else
+		{
+			encoder.Draw((uint32)batch.VertexCount, 1, (uint32)batch.StartIndex, 0);
+		}
 		mStatDrawCalls++;
 		mStatShadowCasters++;
 	}
@@ -1012,14 +1112,15 @@ public class Renderer
 		if (mInstanceBuffers[fi] != null && mInstanceBufferCapacities[fi] >= instanceCount)
 			return;
 
+		// Defer deletion of old buffer — GPU may still be using it
 		if (mInstanceBuffers[fi] != null)
 		{
-			delete mInstanceBuffers[fi];
+			mPendingBufferDeletes.Add((mInstanceBuffers[fi], mDeferFrameCounter));
 			mInstanceBuffers[fi] = null;
 		}
 
 		let size = (uint64)(instanceCount * INSTANCE_STRIDE);
-		BufferDescriptor desc = .(size, .Vertex | .CopyDst);
+		BufferDescriptor desc = .(size, .Vertex | .CopyDst, .Upload);
 		if (mDevice.CreateBuffer(&desc) case .Ok(let buf))
 		{
 			mInstanceBuffers[fi] = buf;
@@ -1156,7 +1257,7 @@ public class Renderer
 		Light shadowLight = null;
 		for (let light in mLightList)
 		{
-			if (light.LightType == .Directional && light.CastShadows)
+			if (light.LightType == .Directional && light.CastShadowsLight)
 			{
 				shadowLight = light;
 				break;
@@ -1337,8 +1438,8 @@ public class Renderer
 
 		for (int fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++)
 		{
-			// Per-frame uniform buffer
-			var frameBufDesc = BufferDescriptor(RenderConstants.FRAME_UNIFORM_SIZE, .Uniform | .CopyDst);
+			// Per-frame uniform buffer (host-visible for direct map, no staging)
+			var frameBufDesc = BufferDescriptor(RenderConstants.FRAME_UNIFORM_SIZE, .Uniform | .CopyDst, .Upload);
 			if (mDevice.CreateBuffer(&frameBufDesc) case .Ok(let frameBuf))
 				mFrameUniformBuffers[fi] = frameBuf;
 			else
@@ -1369,7 +1470,7 @@ public class Renderer
 			}
 
 			// Per-object uniform buffer
-			var objectBufDesc = BufferDescriptor(objectBufSize, .Uniform | .CopyDst);
+			var objectBufDesc = BufferDescriptor(objectBufSize, .Uniform | .CopyDst, .Upload);
 			if (mDevice.CreateBuffer(&objectBufDesc) case .Ok(let objBuf))
 				mObjectUniformBuffers[fi] = objBuf;
 			else
@@ -1384,7 +1485,7 @@ public class Renderer
 				return false;
 
 			// Shadow frame uniform buffer
-			var shadowBufDesc = BufferDescriptor(shadowBufSize, .Uniform | .CopyDst);
+			var shadowBufDesc = BufferDescriptor(shadowBufSize, .Uniform | .CopyDst, .Upload);
 			if (mDevice.CreateBuffer(&shadowBufDesc) case .Ok(let shadowBuf))
 				mShadowFrameBuffers[fi] = shadowBuf;
 			else
@@ -1477,12 +1578,32 @@ public class Renderer
 				cascadeCount > 3 ? cascades[3].SplitFar : 0
 			);
 
-			data.ShadowParams = .((float)cascadeCount, 0.005f,
+			data.ShadowParams = .((float)cascadeCount, 0.0005f,
 				1.0f / (float)mShadowMap.AtlasSize, 1.0f);
+
+			// Normal offset bias and per-cascade world texel sizes
+			float normalBias = 3.0f; // Default normal bias in texels
+			for (let light in mLightList)
+			{
+				if (light.LightType == .Directional && light.CastShadowsLight)
+				{
+					normalBias = light.ShadowNormalOffset;
+					break;
+				}
+			}
+			data.ShadowParams2 = .(normalBias, 0, 0, 0);
+			data.ShadowTexelSizes = .(
+				cascadeCount > 0 ? cascades[0].WorldTexelSize : 0,
+				cascadeCount > 1 ? cascades[1].WorldTexelSize : 0,
+				cascadeCount > 2 ? cascades[2].WorldTexelSize : 0,
+				cascadeCount > 3 ? cascades[3].WorldTexelSize : 0
+			);
 		}
 		else
 		{
 			data.ShadowParams = .(0, 0, 0, 0); // Shadows disabled
+			data.ShadowParams2 = .(0, 0, 0, 0);
+			data.ShadowTexelSizes = .(0, 0, 0, 0);
 		}
 
 		// IBL params from zone's EnvironmentMap
@@ -1570,6 +1691,20 @@ public class Renderer
 		{
 			if (let decalSet = drawable as DecalSet)
 				decalSet.UploadToGPU(mDevice, fi);
+		}
+	}
+
+	/// Uploads static mesh vertex/index data to the GPU for all visible StaticModels
+	/// (including AnimatedModel subclasses) whose buffers are dirty.
+	private void UploadStaticModelBuffers()
+	{
+		for (let drawable in mVisibleGeometry)
+		{
+			if (let model = drawable as StaticModel)
+			{
+				if (model.BuffersDirty)
+					model.UploadToGPU(mDevice);
+			}
 		}
 	}
 

@@ -42,7 +42,8 @@ public class RibbonTrail : Drawable
 	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private uint8[] mVertexData ~ delete _;
 	private uint8[] mIndexData ~ delete _;
-	private int32[MAX_FRAMES] mLastVertexCounts;
+	private List<(IBuffer buffer, int32 frameQueued)> mPendingDeletes = new .() ~ { for (var e in _) delete e.buffer; delete _; };
+	private int32 mDeferFrameCounter = 0;
 	private MaterialInstance mMaterial;
 	private Vector3 mPreviousPosition;
 	private bool mFirstUpdate = true;
@@ -58,6 +59,8 @@ public class RibbonTrail : Drawable
 	private float mEndWidth = 0.0f;
 	private bool mEmitting = true;
 	private float mUVPerUnit = 1.0f;
+
+	private int32[MAX_FRAMES] mLastSegmentCapacities;
 
 	// Vertex: Position(Vec3=12) + UV(Vec2=8) + Color(uint32=4) = 24 bytes
 	private const int32 VERTEX_SIZE = 24;
@@ -238,25 +241,35 @@ public class RibbonTrail : Drawable
 		let vertexDataSize = (uint64)(vertexCount * VERTEX_SIZE);
 		let indexDataSize = (uint64)(segmentCount * 6 * 2); // UInt16
 
-		// Recreate this frame's buffers if vertex count changed
-		if (mVertexBuffers[fi] == null || mLastVertexCounts[fi] != vertexCount)
-		{
-			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
-			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
+		// Flush deferred deletes that have aged past the in-flight window
+		FlushDeferredDeletes();
 
-			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
+		// Only recreate buffers when capacity is insufficient (grow-only)
+		if (mVertexBuffers[fi] == null || segmentCount > mLastSegmentCapacities[fi])
+		{
+			// Defer deletion of old buffers — GPU may still be using them
+			if (mVertexBuffers[fi] != null) { mPendingDeletes.Add((mVertexBuffers[fi], mDeferFrameCounter)); mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { mPendingDeletes.Add((mIndexBuffers[fi], mDeferFrameCounter)); mIndexBuffers[fi] = null; }
+
+			// Allocate with 50% headroom to reduce reallocations
+			let allocSegments = segmentCount + segmentCount / 2;
+			let allocVertexCount = (allocSegments + 1) * 2;
+			let allocVBSize = (uint64)(allocVertexCount * VERTEX_SIZE);
+			let allocIBSize = (uint64)(allocSegments * 6 * 2);
+
+			BufferDescriptor vbDesc = .(allocVBSize, .Vertex | .CopyDst, .Upload);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
 				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
-			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
+			BufferDescriptor ibDesc = .(allocIBSize, .Index | .CopyDst, .Upload);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
 				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mLastVertexCounts[fi] = vertexCount;
+			mLastSegmentCapacities[fi] = allocSegments;
 		}
 
 		if (mVertexData != null && vertexDataSize > 0)
@@ -275,6 +288,16 @@ public class RibbonTrail : Drawable
 	}
 
 	// ===== Private =====
+
+	private void FlushDeferredDeletes()
+	{
+		mDeferFrameCounter++;
+		while (mPendingDeletes.Count > 0 && mDeferFrameCounter - mPendingDeletes[0].frameQueued >= FrameConfig.DELETION_DEFER_FRAMES)
+		{
+			delete mPendingDeletes[0].buffer;
+			mPendingDeletes.RemoveAt(0);
+		}
+	}
 
 	private void AddPoint(Vector3 position, Vector3 forward)
 	{

@@ -42,6 +42,9 @@ public class DebugRenderer : Component
 	private IBuffer mNoDepthBuffer ~ { if (_ != null) delete _; };
 	private int mDepthBufferCapacity = 0;
 	private int mNoDepthBufferCapacity = 0;
+	// Deferred deletion for old buffers the GPU may still reference
+	private List<(IBuffer buffer, int32 frameQueued)> mPendingDeletes = new .() ~ { for (var e in _) delete e.buffer; delete _; };
+	private int32 mDeferFrameCounter = 0;
 
 	// Pipelines (cached)
 	private IRenderPipeline mDepthPipeline;
@@ -207,8 +210,16 @@ public class DebugRenderer : Component
 	/// Uploads debug line data to GPU buffers.
 	public void UpdateBuffers(IDevice device)
 	{
-		UploadLines(device, mDepthLines, ref mDepthBuffer, ref mDepthBufferCapacity);
-		UploadLines(device, mNoDepthLines, ref mNoDepthBuffer, ref mNoDepthBufferCapacity);
+		// Flush deferred deletes that have aged past the in-flight window
+		mDeferFrameCounter++;
+		while (mPendingDeletes.Count > 0 && mDeferFrameCounter - mPendingDeletes[0].frameQueued >= FrameConfig.DELETION_DEFER_FRAMES)
+		{
+			delete mPendingDeletes[0].buffer;
+			mPendingDeletes.RemoveAt(0);
+		}
+
+		UploadLines(device, mDepthLines, ref mDepthBuffer, ref mDepthBufferCapacity, mPendingDeletes, mDeferFrameCounter);
+		UploadLines(device, mNoDepthLines, ref mNoDepthBuffer, ref mNoDepthBufferCapacity, mPendingDeletes, mDeferFrameCounter);
 	}
 
 	/// Renders depth-tested debug lines.
@@ -261,7 +272,7 @@ public class DebugRenderer : Component
 
 	// ===== Private =====
 
-	private static void UploadLines(IDevice device, List<DebugVertex> lines, ref IBuffer buffer, ref int capacity)
+	private static void UploadLines(IDevice device, List<DebugVertex> lines, ref IBuffer buffer, ref int capacity, List<(IBuffer buffer, int32 frameQueued)> pendingDeletes, int32 frameCounter)
 	{
 		if (lines.Count == 0)
 			return;
@@ -271,12 +282,13 @@ public class DebugRenderer : Component
 		// Grow buffer if needed
 		if (buffer == null || lines.Count > capacity)
 		{
+			// Defer deletion of old buffer — GPU may still be using it
 			if (buffer != null)
-				delete buffer;
+				pendingDeletes.Add((buffer, frameCounter));
 
 			let newCapacity = Math.Max(lines.Count, 1024);
 			let bufferSize = (uint64)(newCapacity * sizeof(DebugVertex));
-			BufferDescriptor desc = .(bufferSize, .Vertex | .CopyDst);
+			BufferDescriptor desc = .(bufferSize, .Vertex | .CopyDst, .Upload);
 			if (device.CreateBuffer(&desc) case .Ok(let newBuffer))
 			{
 				buffer = newBuffer;

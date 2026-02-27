@@ -59,6 +59,8 @@ public class ProceduralGeometry : Drawable
 	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private int32[MAX_FRAMES] mLastVertexCounts;
 	private int32[MAX_FRAMES] mLastIndexCounts;
+	private List<(IBuffer buffer, int32 frameQueued)> mPendingDeletes = new .() ~ { for (var e in _) delete e.buffer; delete _; };
+	private int32 mDeferFrameCounter = 0;
 	private bool mDirty = true;
 	private MaterialInstance mDefaultMaterial;
 
@@ -256,26 +258,36 @@ public class ProceduralGeometry : Drawable
 		let vertexDataSize = (uint64)(vertexCount * VERTEX_SIZE);
 		let indexDataSize = (uint64)(indexCount * 4); // UInt32
 
-		// Recreate this frame's buffers if size changed
-		if (mVertexBuffers[fi] == null || mLastVertexCounts[fi] != vertexCount || mLastIndexCounts[fi] != indexCount)
-		{
-			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
-			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
+		// Flush deferred deletes that have aged past the in-flight window
+		FlushDeferredDeletes();
 
-			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
+		// Only recreate buffers when capacity is insufficient (grow-only)
+		if (mVertexBuffers[fi] == null || vertexCount > mLastVertexCounts[fi] || indexCount > mLastIndexCounts[fi])
+		{
+			// Defer deletion of old buffers — GPU may still be using them
+			if (mVertexBuffers[fi] != null) { mPendingDeletes.Add((mVertexBuffers[fi], mDeferFrameCounter)); mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { mPendingDeletes.Add((mIndexBuffers[fi], mDeferFrameCounter)); mIndexBuffers[fi] = null; }
+
+			// Allocate with 50% headroom to reduce reallocations
+			let allocVerts = vertexCount + vertexCount / 2;
+			let allocIndices = indexCount + indexCount / 2;
+			let allocVBSize = (uint64)(allocVerts * VERTEX_SIZE);
+			let allocIBSize = (uint64)(allocIndices * 4); // UInt32
+
+			BufferDescriptor vbDesc = .(allocVBSize, .Vertex | .CopyDst, .Upload);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
 				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
-			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
+			BufferDescriptor ibDesc = .(allocIBSize, .Index | .CopyDst, .Upload);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
 				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mLastVertexCounts[fi] = vertexCount;
-			mLastIndexCounts[fi] = indexCount;
+			mLastVertexCounts[fi] = allocVerts;
+			mLastIndexCounts[fi] = allocIndices;
 		}
 
 		// Build vertex data
@@ -310,6 +322,16 @@ public class ProceduralGeometry : Drawable
 	}
 
 	// ===== Private =====
+
+	private void FlushDeferredDeletes()
+	{
+		mDeferFrameCounter++;
+		while (mPendingDeletes.Count > 0 && mDeferFrameCounter - mPendingDeletes[0].frameQueued >= FrameConfig.DELETION_DEFER_FRAMES)
+		{
+			delete mPendingDeletes[0].buffer;
+			mPendingDeletes.RemoveAt(0);
+		}
+	}
 
 	private void UpdateBounds()
 	{

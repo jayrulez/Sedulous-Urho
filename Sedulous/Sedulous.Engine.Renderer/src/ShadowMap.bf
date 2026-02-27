@@ -20,6 +20,8 @@ public struct ShadowCascade
 	public float SplitFar;
 	/// UV offset+scale into the shadow atlas for this cascade.
 	public Vector4 AtlasRect;
+	/// World-space texel size for normal offset bias.
+	public float WorldTexelSize;
 }
 
 /// Manages shadow map textures and cascade computation for shadow-casting lights.
@@ -102,8 +104,7 @@ public class ShadowMap
 	// ===== Cascade Computation =====
 
 	/// Computes shadow cascades for a directional light.
-	/// camera: the scene camera for frustum splits.
-	/// light: the directional light.
+	/// Uses bounding-sphere fitting, practical split scheme, and texel snapping for stable shadows.
 	public void ComputeDirectionalCascades(Camera camera, Light light)
 	{
 		mCascades.Clear();
@@ -112,45 +113,62 @@ public class ShadowMap
 			return;
 
 		let cascadeCount = light.ShadowCascadeCount;
-		let lightDir = light.Direction;
+		let lightDir = Vector3.Normalize(light.Direction);
 		let nearClip = camera.NearClip;
-		let farClip = camera.FarClip;
+		// Cap effective far distance to shadow distance for better resolution
+		let effectiveFar = Math.Min(camera.FarClip, light.ShadowDistance);
+		let cascadeResolution = mAtlasSize / (uint32)cascadeCount;
+		let lambda = light.ShadowSplitLambda;
 
 		for (int32 i = 0; i < cascadeCount; i++)
 		{
-			float splitNear = (i == 0) ? nearClip : nearClip + (farClip - nearClip) * light.GetShadowCascadeSplit(i - 1);
-			float splitFar = nearClip + (farClip - nearClip) * light.GetShadowCascadeSplit(i);
+			// Practical split scheme: blend between uniform and logarithmic distribution
+			float p = (float)(i + 1) / (float)cascadeCount;
+			float pPrev = (float)i / (float)cascadeCount;
+
+			float logSplit = nearClip * Math.Pow(effectiveFar / nearClip, p);
+			float uniformSplit = nearClip + (effectiveFar - nearClip) * p;
+			float splitFar = lambda * logSplit + (1.0f - lambda) * uniformSplit;
+
+			float logNear = nearClip * Math.Pow(effectiveFar / nearClip, pPrev);
+			float uniformNear = nearClip + (effectiveFar - nearClip) * pPrev;
+			float splitNear = (i == 0) ? nearClip : lambda * logNear + (1.0f - lambda) * uniformNear;
 
 			// Compute frustum corners for this split
 			let splitFrustumCorners = ComputeSplitFrustumCorners(camera, splitNear, splitFar);
 
-			// Compute light view matrix (looking along light direction)
+			// Compute bounding sphere for stable shadow edges
 			let center = ComputeFrustumCenter(splitFrustumCorners);
-			let lightView = Matrix.CreateLookAt(center - lightDir * 100.0f, center, Vector3.Up);
-
-			// Find bounds of split frustum in light view space
-			float minX = float.MaxValue, maxX = float.MinValue;
-			float minY = float.MaxValue, maxY = float.MinValue;
-			float minZ = float.MaxValue, maxZ = float.MinValue;
-
+			float radius = 0;
 			for (let corner in splitFrustumCorners)
 			{
-				let lightSpaceCorner = Vector3.Transform(corner, lightView);
-				minX = Math.Min(minX, lightSpaceCorner.X);
-				maxX = Math.Max(maxX, lightSpaceCorner.X);
-				minY = Math.Min(minY, lightSpaceCorner.Y);
-				maxY = Math.Max(maxY, lightSpaceCorner.Y);
-				minZ = Math.Min(minZ, lightSpaceCorner.Z);
-				maxZ = Math.Max(maxZ, lightSpaceCorner.Z);
+				let dist = Vector3.Distance(corner, center);
+				radius = Math.Max(radius, dist);
 			}
+			// Round up to reduce shadow edge swimming
+			radius = Math.Ceiling(radius * 16.0f) / 16.0f;
 
-			// Extend Z range to capture shadow casters behind the frustum
-			float zRange = maxZ - minZ;
-			minZ -= zRange * 2.0f;
+			// Stable up vector — avoid degenerate CreateLookAt when light is near-vertical
+			Vector3 refVec = Math.Abs(lightDir.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+			Vector3 lightRight = Vector3.Normalize(Vector3.Cross(refVec, lightDir));
+			Vector3 lightUp = Vector3.Cross(lightDir, lightRight);
 
-			let lightProjection = Matrix.CreateOrthographicOffCenter(minX, maxX, minY, maxY, minZ, maxZ);
+			// Position light far enough back to capture shadow casters
+			let shadowBackDist = radius * 2.0f;
+			let lightPos = center - lightDir * shadowBackDist;
+			let lightView = Matrix.CreateLookAt(lightPos, center, lightUp);
 
-			// Atlas rect: divide atlas into a grid
+			// Symmetric orthographic projection using bounding sphere
+			var lightProjection = Matrix.CreateOrthographic(radius * 2.0f, radius * 2.0f, 0.01f, shadowBackDist * 2.0f);
+
+			// Snap to texel grid to prevent shadow edge swimming when camera moves
+			var viewProj = lightView * lightProjection;
+			viewProj = SnapToTexelGrid(viewProj, cascadeResolution);
+
+			// World-space texel size = ortho width / cascade resolution (for normal offset bias)
+			float worldTexelSize = (radius * 2.0f) / (float)cascadeResolution;
+
+			// Atlas rect: divide atlas horizontally
 			float cascadeSize = 1.0f / (float)cascadeCount;
 			Vector4 atlasRect = .(cascadeSize * (float)i, 0, cascadeSize, 1);
 
@@ -158,13 +176,35 @@ public class ShadowMap
 			{
 				ViewMatrix = lightView,
 				ProjectionMatrix = lightProjection,
-				ViewProjectionMatrix = lightView * lightProjection,
+				ViewProjectionMatrix = viewProj,
 				SplitNear = splitNear,
 				SplitFar = splitFar,
-				AtlasRect = atlasRect
+				AtlasRect = atlasRect,
+				WorldTexelSize = worldTexelSize
 			};
 			mCascades.Add(cascade);
 		}
+	}
+
+	/// Snaps the view-projection matrix to texel boundaries to prevent shadow swimming.
+	private static Matrix SnapToTexelGrid(Matrix viewProj, uint32 resolution)
+	{
+		// Transform origin to shadow map space
+		var shadowOrigin = Vector4.Transform(Vector4(0, 0, 0, 1), viewProj);
+		shadowOrigin = shadowOrigin * ((float)resolution / 2.0f);
+
+		// Round to nearest texel
+		let roundedX = Math.Round(shadowOrigin.X);
+		let roundedY = Math.Round(shadowOrigin.Y);
+
+		// Calculate offset and apply
+		var offsetX = (roundedX - shadowOrigin.X) * (2.0f / (float)resolution);
+		var offsetY = (roundedY - shadowOrigin.Y) * (2.0f / (float)resolution);
+
+		var result = viewProj;
+		result.M41 += offsetX;
+		result.M42 += offsetY;
+		return result;
 	}
 
 	/// Computes a single shadow map for a spot light.
@@ -207,17 +247,18 @@ public class ShadowMap
 		let farHalfW = farHalfH * aspect;
 
 		// Frustum corners in view space
+		// Right-handed view space: -Z is forward, so near/far are at negative Z
 		Vector3[8] viewCorners = .(
 			// Near plane
-			.(-nearHalfW, -nearHalfH, splitNear),
-			.( nearHalfW, -nearHalfH, splitNear),
-			.( nearHalfW,  nearHalfH, splitNear),
-			.(-nearHalfW,  nearHalfH, splitNear),
+			.(-nearHalfW, -nearHalfH, -splitNear),
+			.( nearHalfW, -nearHalfH, -splitNear),
+			.( nearHalfW,  nearHalfH, -splitNear),
+			.(-nearHalfW,  nearHalfH, -splitNear),
 			// Far plane
-			.(-farHalfW, -farHalfH, splitFar),
-			.( farHalfW, -farHalfH, splitFar),
-			.( farHalfW,  farHalfH, splitFar),
-			.(-farHalfW,  farHalfH, splitFar)
+			.(-farHalfW, -farHalfH, -splitFar),
+			.( farHalfW, -farHalfH, -splitFar),
+			.( farHalfW,  farHalfH, -splitFar),
+			.(-farHalfW,  farHalfH, -splitFar)
 		);
 
 		// Transform to world space using inverse view matrix

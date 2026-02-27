@@ -20,11 +20,13 @@ public struct SourceBatch
 	public float Distance;
 	/// Geometry sub-mesh start index.
 	public int32 StartIndex;
-	/// Number of indices to draw.
+	/// Number of indices to draw (indexed path).
 	public int32 IndexCount;
+	/// Number of vertices to draw (non-indexed path, used when IndexBuffer is null).
+	public int32 VertexCount;
 	/// The GPU vertex buffer.
 	public IBuffer VertexBuffer;
-	/// The GPU index buffer.
+	/// The GPU index buffer (null for non-indexed draws).
 	public IBuffer IndexBuffer;
 	/// Index format (UInt16 or UInt32).
 	public IndexFormat IndexBufferFormat;

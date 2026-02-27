@@ -19,7 +19,7 @@ public static class RenderConstants
 	public const int32 MAX_SHADOW_CASCADES = 4;
 
 	/// Size of the per-frame uniform buffer in bytes.
-	public const uint32 FRAME_UNIFORM_SIZE = 816;
+	public const uint32 FRAME_UNIFORM_SIZE = 848;
 
 	/// Size of a single per-object uniform entry in bytes.
 	public const uint32 OBJECT_UNIFORM_SIZE = 80;
@@ -72,9 +72,13 @@ public struct FrameUniformData
 	public Vector4 ShadowSplits;             // 16 bytes, offset 768
 	/// x = num cascades, y = shadow bias, z = 1/atlas size, w = shadow enabled (1 or 0).
 	public Vector4 ShadowParams;             // 16 bytes, offset 784
+	/// x = normal offset bias (texels), y = cascade0 world texel size, z = cascade1, w = cascade2.
+	public Vector4 ShadowParams2;            // 16 bytes, offset 800
+	/// Per-cascade world texel sizes for cascades 0-3 (used for normal offset scaling).
+	public Vector4 ShadowTexelSizes;         // 16 bytes, offset 816
 	/// IBL: x = diffuse intensity, y = specular intensity, z = prefiltered mip count, w = IBL enabled (1 or 0).
-	public Vector4 IBLParams;                // 16 bytes, offset 800
-	// Total: 816 bytes
+	public Vector4 IBLParams;                // 16 bytes, offset 832
+	// Total: 848 bytes
 }
 
 /// Per-object uniform data uploaded to the GPU for each draw call.

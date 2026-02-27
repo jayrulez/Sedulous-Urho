@@ -173,13 +173,13 @@ public class Sprite2D : Drawable
 			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
 			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
 
-			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
+			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst, .Upload);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
 				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
-			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
+			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst, .Upload);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
 				mIndexBuffers[fi] = ib;
 			else

@@ -38,15 +38,16 @@ public static class VertexLayoutHelper
 		.(VertexFormat.Float3, 36, 4)   // Tangent (float3)
 	);
 
-	/// SkinnedMesh: Mesh attributes + JointIndices (uint4) + JointWeights (float4)
+	/// SkinnedMesh: Mesh attributes + JointIndices (ushort4) + JointWeights (float4) = 72 bytes
+	/// Matches Sedulous.Geometry.SkinnedVertex struct layout.
 	public static VertexAttribute[7] SkinnedMeshAttributes = .(
 		.(VertexFormat.Float3, 0, 0),   // Position
 		.(VertexFormat.Float3, 12, 1),  // Normal
 		.(VertexFormat.Float2, 24, 2),  // UV
 		.(VertexFormat.UByte4Normalized, 32, 3), // Color
 		.(VertexFormat.Float3, 36, 4),  // Tangent
-		.(VertexFormat.UInt4, 48, 5),   // Joint Indices
-		.(VertexFormat.Float4, 64, 6)   // Joint Weights
+		.(VertexFormat.UShort4, 48, 5), // Joint Indices (uint16[4] = 8 bytes)
+		.(VertexFormat.Float4, 56, 6)   // Joint Weights (float4 at offset 56)
 	);
 
 	/// Decal: Position (float3) + Normal (float3) + UV (float2) + Color (ubyte4norm) = 36 bytes
@@ -87,7 +88,7 @@ public static class VertexLayoutHelper
 		case .PositionUVColor: return 24;    // float3 + float2 + ubyte4
 		case .MeshNoTangent: return 32;      // float3 + float3 + float2
 		case .Mesh: return 48;               // float3 + float3 + float2 + ubyte4 + float3
-		case .SkinnedMesh: return 80;        // Mesh + uint4 + float4
+		case .SkinnedMesh: return 72;        // Mesh(48) + ushort4(8) + float4(16)
 		case .Decal: return 36;              // float3 + float3 + float2 + ubyte4
 		case .DebugLine: return 16;          // float3 + ubyte4
 		case .Custom: return 0;              // Custom layouts define their own stride

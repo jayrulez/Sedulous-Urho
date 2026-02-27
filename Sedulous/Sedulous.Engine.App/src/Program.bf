@@ -4,13 +4,26 @@ using Sedulous.Engine.Core;
 using Sedulous.Engine.Renderer;
 using Sedulous.Engine.Physics;
 using Sedulous.Engine.Physics.Jolt;
+using Sedulous.Engine.Animation;
 using Sedulous.Foundation.Mathematics;
 using Sedulous.Geometry;
+using Sedulous.Geometry.Tooling;
 using Sedulous.Materials;
+using Sedulous.Models;
+using Sedulous.Models.GLTF;
+using Sedulous.Models.FBX;
+using Sedulous.Resources;
 using Sedulous.Shell;
 using Sedulous.Shell.Input;
 using Sedulous.Imaging;
+using Sedulous.Imaging.STB;
+using Sedulous.Textures.Resources;
+using Sedulous.Materials.Resources;
 using Sedulous.RHI;
+using Sedulous.Imaging.SDL;
+using Sedulous.Profiler;
+using Sedulous.Jobs;
+using System.Threading;
 
 namespace Sedulous.Engine.App;
 
@@ -40,6 +53,45 @@ class DemoApp : SedulousApp
 	// Debug
 	private DebugRenderer mDebugRenderer;
 
+	// Model loading
+	private List<ModelImportResult> mImportResults = new .() ~ {
+		for (let r in _) delete r;
+		delete _;
+	};
+	private List<ITexture> mModelTextures = new .() ~ {
+		for (let t in _) delete t;
+		delete _;
+	};
+	private List<ITextureView> mModelTextureViews = new .() ~ {
+		for (let v in _) delete v;
+		delete _;
+	};
+
+	// Async model loading
+	private Monitor mModelLoadLock = new .() ~ delete _;
+	private List<PendingModelLoad> mPendingModelLoads = new .() ~ {
+		for (let r in _) { if (r.ImportResult != null) delete r.ImportResult; delete r; }
+		delete _;
+	};
+	private int32 mModelsQueuedCount = 0;
+	private int32 mModelsLoadedCount = 0;
+
+	class PendingModelLoad
+	{
+		public String Name ~ delete _;
+		public float Scale;
+		public Vector3 StaticPos;
+		public Vector3 AnimPos;
+		public ModelImportResult ImportResult;
+
+		public ModelImportResult TakeImportResult()
+		{
+			let r = ImportResult;
+			ImportResult = null;
+			return r;
+		}
+	}
+
 	// Owned resources (not managed by scene)
 	private Material mPbrMaterial;
 	private List<MaterialInstance> mMaterialInstances = new .() ~ {
@@ -60,16 +112,21 @@ class DemoApp : SedulousApp
 		Parameters.WindowTitle = "Sedulous - Static Scene";
 		Parameters.WindowWidth = 1280;
 		Parameters.WindowHeight = 720;
+		Parameters.PresentMode = .Immediate; // No vsync — uncapped FPS for perf testing
 	}
 
 	protected override void Start()
 	{
 		Logger?.LogInformation("Starting Static Scene demo...");
 
+		// --- Initialize Profiler ---
+		SProfiler.Initialize();
+
 		// --- Initialize Renderer ---
 		mRenderer = new Renderer(Logger);
 		let shaderPath = scope String();
 		GetAssetPath("Shaders", shaderPath);
+		// Shader caching disabled — changes to .hlsli files take effect immediately
 		if (mRenderer.Initialize(Device, scope StringView[](shaderPath)) case .Err)
 		{
 			Logger?.LogCritical("Failed to initialize renderer.");
@@ -119,6 +176,9 @@ class DemoApp : SedulousApp
 		// --- Sprite ---
 		CreateSprite();
 
+		// --- 3D Models (static + animated, loaded asynchronously) ---
+		StartModelLoading();
+
 		// --- Viewport ---
 		mViewport = new Viewport(mScene, camera);
 		mRenderer.SetViewport(0, mViewport);
@@ -164,7 +224,6 @@ class DemoApp : SedulousApp
 		if(CreateMaterialInstance(.(0.5f, 0.5f, 0.5f, 1.0f), 0.0f, 0.8f) case .Ok(let planeInst))
 		{
 			planeModel.SetMaterial(planeInst);
-			planeModel.UploadToGPU(Device);
 		}
 
 		// Static physics body for the ground
@@ -220,7 +279,6 @@ class DemoApp : SedulousApp
 			model.Mesh = meshes[meshIdx];
 			model.SetMaterial(materials[rng.Next(4)]);
 			model.CastShadows = true;
-			model.UploadToGPU(Device);
 
 			// Add physics body
 			if (pw != null)
@@ -390,6 +448,324 @@ class DemoApp : SedulousApp
 			sprite.Material = spriteInst;
 	}
 
+		struct ModelDef
+		{
+			public StringView path;
+			public StringView name;
+			public float scale;
+			public Vector3 staticPos;
+			public Vector3 animPos;
+		}
+
+	private void StartModelLoading()
+	{
+		// Initialize model loaders and image decoder (must be on main thread)
+		SDLImageLoader.Initialize();
+		STBImageLoader.Initialize();
+		GltfModels.Initialize();
+		FbxModels.Initialize();
+
+		ModelDef[?] models = .(
+			.() { path = "Models/PlatformerGameKit/Character/glTF/Character.gltf", name = "CharGLTF", scale = 1.0f, staticPos = .(-10, 0, 10), animPos = .(-7, 0, 10) },
+			.() { path = "Models/PlatformerGameKit/Character/FBX/Character.fbx", name = "CharFBX", scale = 1.0f, staticPos = .(-4, 0, 10), animPos = .(-1, 0, 10) },
+			.() { path = "Models/Fox/glTF/Fox.gltf", name = "Fox", scale = 0.03f, staticPos = .(2, 0, 10), animPos = .(5, 0, 10) },
+			.() { path = "Models/UltimateMonsters/Blob/glTF/GreenBlob.gltf", name = "GreenBlob", scale = 1.0f, staticPos = .(8, 0, 10), animPos = .(11, 0, 10) }
+		);
+
+		let jobSystem = Context.GetSubsystem<JobSystem>();
+
+		for (let def in models)
+		{
+			// Pre-compute paths on main thread (GetAssetPath uses app state)
+			let fullPath = new String();
+			GetAssetPath(def.path, fullPath);
+
+			let basePath = new String(fullPath);
+			let lastSlash = Math.Max(basePath.LastIndexOf('/'), basePath.LastIndexOf('\\'));
+			if (lastSlash >= 0)
+				basePath.RemoveToEnd(lastSlash + 1);
+
+			let name = new String(def.name);
+			let scale = def.scale;
+			let staticPos = def.staticPos;
+			let animPos = def.animPos;
+
+			mModelsQueuedCount++;
+
+			if (jobSystem != null && jobSystem.IsRunning)
+			{
+				// Background job: disk I/O + model parsing + image conversion
+				jobSystem.AddJob(
+					new () => {
+						LoadSingleModel(fullPath, basePath, name, scale, staticPos, animPos);
+					},
+					ownsJobDelegate: true,
+					jobName: def.name
+				);
+			}
+			else
+			{
+				// Fallback: synchronous loading
+				LoadSingleModel(fullPath, basePath, name, scale, staticPos, animPos);
+			}
+		}
+	}
+
+	/// Loads a single model on the background thread and queues it for main-thread processing.
+	/// Takes ownership of fullPath, basePath, and name strings.
+	private void LoadSingleModel(String fullPath, String basePath, String name, float scale, Vector3 staticPos, Vector3 animPos)
+	{
+		defer { delete fullPath; delete basePath; }
+
+		let model = new Sedulous.Models.Model();
+		defer delete model;
+
+		let loadResult = ModelLoaderFactory.LoadModel(fullPath, model);
+		if (loadResult != .Ok)
+		{
+			Logger?.LogWarning(scope $"Failed to load model '{name}': {loadResult}");
+			delete name;
+			return;
+		}
+
+		let options = new ModelImportOptions();
+		options.Flags = .All;
+		options.BasePath.Set(basePath);
+
+		let importer = new ModelImporter(options);
+		defer delete importer;
+		let result = importer.Import(model);
+
+		if (!result.Success)
+		{
+			for (let err in result.Errors)
+				Logger?.LogWarning(scope $"Import error for '{name}': {err}");
+			delete result;
+			delete name;
+			return;
+		}
+
+		for (let warn in result.Warnings)
+			Logger?.LogInformation(scope $"Import warning for '{name}': {warn}");
+
+		Logger?.LogInformation(scope $"Imported '{name}': {result.StaticMeshes.Count} static, {result.SkinnedMeshes.Count} skinned, {result.Skeletons.Count} skeletons, {result.Animations.Count} anims, {result.Textures.Count} textures, {result.Materials.Count} materials");
+
+		// Queue for main-thread processing (GPU upload + scene creation)
+		let pending = new PendingModelLoad();
+		pending.Name = name; // transfer ownership
+		pending.Scale = scale;
+		pending.StaticPos = staticPos;
+		pending.AnimPos = animPos;
+		pending.ImportResult = result;
+
+		using (mModelLoadLock.Enter())
+			mPendingModelLoads.Add(pending);
+	}
+
+	/// Processes models that finished loading on background threads.
+	/// Uploads textures, creates materials, and adds scene nodes on the main thread.
+	private void ProcessPendingModels()
+	{
+		let toProcess = scope List<PendingModelLoad>();
+
+		using (mModelLoadLock.Enter())
+		{
+			if (mPendingModelLoads.Count == 0)
+				return;
+			toProcess.AddRange(mPendingModelLoads);
+			mPendingModelLoads.Clear();
+		}
+
+		for (let pending in toProcess)
+		{
+			let result = pending.ImportResult;
+
+			// Upload textures to GPU
+			let textureMap = scope Dictionary<Guid, ITextureView>();
+			UploadModelTextures(result, textureMap);
+
+			// Create material instances from imported materials
+			let materials = CreateModelMaterials(result, textureMap);
+			defer delete materials;
+
+			// Create scene nodes (static + animated)
+			CreateModelPair(pending.Name, pending.StaticPos, pending.AnimPos, pending.Scale, result, materials);
+
+			// Transfer import result ownership to mImportResults
+			mImportResults.Add(pending.TakeImportResult());
+
+			mModelsLoadedCount++;
+			Logger?.LogInformation(scope $"Model '{pending.Name}' added to scene ({mModelsLoadedCount}/{mModelsQueuedCount})");
+
+			delete pending;
+		}
+	}
+
+	private void UploadModelTextures(ModelImportResult result, Dictionary<Guid, ITextureView> textureMap)
+	{
+		for (let texRes in result.Textures)
+		{
+			let image = texRes.Image;
+			if (image == null) continue;
+
+			// Convert non-RGBA8 images to RGBA8 for GPU upload
+			Image uploadImage = image;
+			Image convertedImage = null;
+			if (image.Format != .RGBA8 && image.Format != .BGRA8)
+			{
+				if (image.ConvertFormat(.RGBA8) case .Ok(let converted))
+				{
+					convertedImage = converted;
+					uploadImage = converted;
+				}
+				else
+					continue;
+			}
+
+			let format = uploadImage.Format == .BGRA8 ? TextureFormat.BGRA8Unorm : TextureFormat.RGBA8Unorm;
+			var texDesc = TextureDescriptor.Texture2D(uploadImage.Width, uploadImage.Height, format, .Sampled | .CopyDst);
+
+			ITexture gpuTex = null;
+			if (Device.CreateTexture(&texDesc) case .Ok(let tex))
+				gpuTex = tex;
+			else
+			{
+				if (convertedImage != null) delete convertedImage;
+				continue;
+			}
+
+			var layout = TextureDataLayout() { Offset = 0, BytesPerRow = uploadImage.Width * 4, RowsPerImage = uploadImage.Height };
+			var writeSize = Extent3D() { Width = uploadImage.Width, Height = uploadImage.Height, Depth = 1 };
+			Device.Queue.WriteTexture(gpuTex, uploadImage.Data, &layout, &writeSize);
+
+			var viewDesc = TextureViewDescriptor() { Format = format };
+			if (Device.CreateTextureView(gpuTex, &viewDesc) case .Ok(let view))
+			{
+				mModelTextures.Add(gpuTex);
+				mModelTextureViews.Add(view);
+				textureMap[texRes.Id] = view;
+			}
+			else
+			{
+				delete gpuTex;
+			}
+
+			if (convertedImage != null) delete convertedImage;
+		}
+	}
+
+	private List<MaterialInstance> CreateModelMaterials(ModelImportResult result, Dictionary<Guid, ITextureView> textureMap)
+	{
+		let materials = new List<MaterialInstance>();
+
+		for (let matRes in result.Materials)
+		{
+			let mat = matRes.Material;
+			if (mat == null)
+			{
+				materials.Add(null);
+				continue;
+			}
+
+			// Set default textures/samplers on the material so bind group creation succeeds
+			mat.SetDefaultTexture("AlbedoMap", mRenderer.MaterialSystem.WhiteTexture);
+			mat.SetDefaultTexture("NormalMap", mRenderer.MaterialSystem.WhiteTexture);
+			mat.SetDefaultTexture("MetallicRoughnessMap", mRenderer.MaterialSystem.WhiteTexture);
+			mat.SetDefaultTexture("OcclusionMap", mRenderer.MaterialSystem.WhiteTexture);
+			mat.SetDefaultTexture("EmissiveMap", mRenderer.MaterialSystem.WhiteTexture);
+			mat.SetDefaultSampler("MainSampler", mRenderer.MaterialSystem.DefaultSampler);
+
+			// Create instance
+			let inst = new MaterialInstance(mat);
+
+			// Override textures from imported texture refs
+			for (let kv in matRes.TextureRefs)
+			{
+				let slotName = kv.key;
+				let texRef = kv.value;
+				if (texRef.HasId && textureMap.TryGetValue(texRef.Id, let view))
+				{
+					inst.SetTexture(slotName, view);
+				}
+			}
+
+			mMaterialInstances.Add(inst);
+			if (mRenderer.MaterialSystem.PrepareInstance(inst) case .Ok)
+				materials.Add(inst);
+			else
+			{
+				Logger?.LogWarning(scope $"Failed to prepare material instance");
+				materials.Add(null);
+			}
+		}
+
+		return materials;
+	}
+
+	private void CreateModelPair(StringView name, Vector3 staticPos, Vector3 animPos, float scale, ModelImportResult result, List<MaterialInstance> materials)
+	{
+		// --- Static version (use importer's StaticMeshes which have node transforms baked in) ---
+		if (result.StaticMeshes.Count > 0 && result.StaticMeshes[0].Mesh != null)
+		{
+			let srcMesh = result.StaticMeshes[0].Mesh;
+			let node = mScene.CreateChild(scope $"{name}_Static");
+			node.Position = staticPos;
+			node.Scale = .(scale, scale, scale);
+
+			let model = node.CreateComponent<StaticModel>();
+			model.Mesh = srcMesh;
+			model.CastShadows = true;
+
+			for (int i = 0; i < srcMesh.SubMeshes.Count; i++)
+			{
+				let matIdx = srcMesh.SubMeshes[i].materialIndex;
+				if (matIdx >= 0 && matIdx < materials.Count && materials[matIdx] != null)
+					model.SetMaterial(i, materials[matIdx]);
+			}
+			Logger?.LogInformation(scope $"Created static model '{name}' from static mesh ({srcMesh.Vertices.VertexCount} verts, {srcMesh.SubMeshes.Count} submeshes)");
+		}
+		else
+		{
+			Logger?.LogWarning(scope $"No static meshes in '{name}', skipping static version");
+		}
+
+		// --- Animated version (testing with 1 model) ---
+		if (result.SkinnedMeshes.Count > 0 && result.SkinnedMeshes[0].Mesh != null)
+		{
+			let skinnedMesh = result.SkinnedMeshes[0].Mesh;
+			let node = mScene.CreateChild(scope $"{name}_Anim");
+			node.Position = animPos;
+			node.Scale = .(scale, scale, scale);
+
+			let animModel = node.CreateComponent<AnimatedModel>();
+			animModel.SkinnedMesh = skinnedMesh;
+			animModel.CastShadows = true;
+
+			if (result.Skeletons.Count > 0)
+				animModel.Skeleton = result.Skeletons[0].Skeleton;
+
+			if (result.Animations.Count > 0)
+			{
+				let clip = result.Animations[0].Clip;
+				if (clip != null)
+				{
+					clip.IsLooping = true;
+					animModel.PlayAnimation(clip);
+				}
+			}
+
+			for (int i = 0; i < skinnedMesh.SubMeshes.Count; i++)
+			{
+				let matIdx = skinnedMesh.SubMeshes[i].materialIndex;
+				if (matIdx >= 0 && matIdx < materials.Count && materials[matIdx] != null)
+					animModel.SetMaterial(i, materials[matIdx]);
+			}
+
+			Logger?.LogInformation(scope $"Created animated model '{name}' ({skinnedMesh.VertexCount} verts, {skinnedMesh.SubMeshes.Count} submeshes, {result.Animations.Count} anims)");
+		}
+	}
+
+
 	private Result<MaterialInstance> CreateMaterialInstance(Vector4 baseColor, float metallic, float roughness)
 	{
 		let inst = new MaterialInstance(mPbrMaterial);
@@ -404,7 +780,14 @@ class DemoApp : SedulousApp
 
 	private void OnUpdate(float timeStep)
 	{
+		using (SProfiler.Begin("App.OnUpdate"))
+		{
+		// Process models that finished loading on background threads
+		ProcessPendingModels();
+
 		// Step physics and sync dynamic body transforms
+		using (SProfiler.Begin("Physics"))
+		{
 		let pw = mScene?.GetComponent<PhysicsWorld>();
 		if (pw != null)
 		{
@@ -412,6 +795,7 @@ class DemoApp : SedulousApp
 			for (let rb in mDynamicBodies)
 				rb.SyncFromPhysics();
 		}
+		} // Profiler: Physics
 
 		let shell = Context.GetSubsystem<IShell>();
 		if (shell == null) return;
@@ -562,14 +946,35 @@ class DemoApp : SedulousApp
 				Console.WriteLine(scope $"  RENDERER: visGeometry={mRenderer.StatVisibleGeometry} opaque={mRenderer.StatOpaqueBatches} transparent={mRenderer.StatTransparentBatches} drawCalls={mRenderer.StatDrawCalls}");
 			}
 		}
+
+		// F1: Print profiler output
+		if (kb.IsKeyPressed(.F1))
+		{
+			let frame = SProfiler.GetCompletedFrame();
+			if (frame != null)
+			{
+				Console.WriteLine(scope $"=== PROFILER FRAME {frame.FrameNumber} ({frame.FrameDurationMs:F2}ms) ===");
+				for (let sample in frame.Samples)
+				{
+					let indent = scope String();
+					for (int d = 0; d < sample.Depth; d++)
+						indent.Append("  ");
+					Console.WriteLine(scope $"  {indent}{sample.Name}: {sample.DurationMs:F3}ms");
+				}
+			}
+		}
+		} // Profiler: App.OnUpdate
 	}
 
 	private void OnRender()
 	{
+		using (SProfiler.Begin("App.OnRender"))
+		{
 		mRenderer.Update(Engine.DeltaTime);
 		// DEBUG: Full GPU sync to detect buffer thrashing
 		//Device.WaitIdle();
 		mRenderer.Render(SwapChain);
+		} // Profiler: App.OnRender
 	}
 
 	private void OnResize(int32 width, int32 height)
@@ -580,6 +985,7 @@ class DemoApp : SedulousApp
 	protected override void Stop()
 	{
 		Logger?.LogInformation("Stopping Static Scene demo...");
+		SProfiler.Shutdown();
 
 		if (mRenderer != null)
 		{
@@ -627,6 +1033,25 @@ class DemoApp : SedulousApp
 			delete mScene;
 			mScene = null;
 		}
+
+		// Delete import results after scene (components reference meshes/skeletons/clips)
+		for (let r in mImportResults)
+			delete r;
+		mImportResults.Clear();
+
+		// Delete model GPU textures/views after material instances are gone
+		for (let v in mModelTextureViews)
+			delete v;
+		mModelTextureViews.Clear();
+		for (let t in mModelTextures)
+			delete t;
+		mModelTextures.Clear();
+
+		// Shutdown model loaders
+		if (GltfModels.IsInitialized)
+			GltfModels.Shutdown();
+		if (FbxModels.IsInitialized)
+			FbxModels.Shutdown();
 
 		// Delete Jolt world after scene (PhysicsWorld component may reference it during teardown)
 		if (mJoltWorld != null)

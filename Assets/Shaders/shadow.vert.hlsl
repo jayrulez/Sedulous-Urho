@@ -1,7 +1,6 @@
 // Shadow Depth Vertex Shader
 // Renders depth only for shadow map generation.
-// Declares only the cbuffers it needs (no common.hlsli) to keep
-// SPIRV bindings minimal for the shadow-specific pipeline layout.
+// Supports SKINNED variant for animated models.
 #pragma pack_matrix(row_major)
 
 // Per-frame uniforms (space1) — only View/Projection/ViewProjection used.
@@ -19,9 +18,25 @@ cbuffer ObjectUniforms : register(b0, space2)
     float4x4 World;
 };
 
+#ifdef SKINNED
+#define MAX_BONES 96
+cbuffer BoneMatrices : register(b0, space3)
+{
+    float4x4 Bones[MAX_BONES];
+};
+#endif
+
 struct VSInput
 {
     float3 Position : POSITION;
+#ifdef SKINNED
+    float3 Normal : NORMAL;
+    float2 TexCoord : TEXCOORD0;
+    uint32_t Color : COLOR0;
+    float4 Tangent : TANGENT;
+    uint4 BoneIndices : BLENDINDICES;
+    float4 BoneWeights : BLENDWEIGHT;
+#endif
 };
 
 struct VSOutput
@@ -32,7 +47,18 @@ struct VSOutput
 VSOutput main(VSInput input)
 {
     VSOutput output;
-    float4 worldPos = mul(float4(input.Position, 1.0), World);
+    float3 localPos = input.Position;
+
+#ifdef SKINNED
+    float4x4 skinMatrix =
+        Bones[input.BoneIndices.x] * input.BoneWeights.x +
+        Bones[input.BoneIndices.y] * input.BoneWeights.y +
+        Bones[input.BoneIndices.z] * input.BoneWeights.z +
+        Bones[input.BoneIndices.w] * input.BoneWeights.w;
+    localPos = mul(float4(localPos, 1.0), skinMatrix).xyz;
+#endif
+
+    float4 worldPos = mul(float4(localPos, 1.0), World);
     output.ClipPosition = mul(worldPos, ViewProjection);
     return output;
 }

@@ -36,16 +36,19 @@ public class Light : Drawable
 	private bool mCastShadowsLight = false;
 	private float mShadowBias = 0.0002f;
 	private float mShadowSlopeScaledBias = 1.0f;
-	private float mShadowNormalOffset = 0.5f;
+	private float mShadowNormalOffset = 3.0f;
 	private float mShadowResolution = 1.0f;
-	private int32 mShadowCascadeCount = 4;
-	private float[4] mShadowCascadeSplits = .(0.1f, 0.25f, 0.5f, 1.0f);
+	private int32 mShadowCascadeCount = 3;
+	private float mShadowSplitLambda = 0.5f;
+	private float[4] mShadowCascadeSplits = .(0.15f, 1.0f, 0.5f, 1.0f);
 
 	public this()
 	{
 		SetDrawableType(.Light);
 		// Directional lights have infinite bounds
 		BoundingBox = .(Vector3(-1e10f), Vector3(1e10f));
+		// Default shadow distance for lights (overrides Drawable's 0 default)
+		ShadowDistance = 150.0f;
 	}
 
 	// ===== Properties =====
@@ -157,6 +160,13 @@ public class Light : Drawable
 	{
 		get => mShadowCascadeCount;
 		set => mShadowCascadeCount = Math.Clamp(value, 1, 4);
+	}
+
+	/// Lambda for practical cascade split scheme (0=uniform, 1=logarithmic, 0.5=balanced).
+	public float ShadowSplitLambda
+	{
+		get => mShadowSplitLambda;
+		set => mShadowSplitLambda = Math.Clamp(value, 0.0f, 1.0f);
 	}
 
 	// ===== Methods =====

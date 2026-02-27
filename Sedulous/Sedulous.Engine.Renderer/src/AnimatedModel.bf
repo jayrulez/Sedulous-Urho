@@ -5,6 +5,7 @@ using Sedulous.Engine.Core;
 using Sedulous.Engine.Animation;
 using Sedulous.Geometry;
 using Sedulous.RHI;
+using Sedulous.Materials;
 
 namespace Sedulous.Engine.Renderer;
 
@@ -13,6 +14,10 @@ namespace Sedulous.Engine.Renderer;
 /// Holds a Skeleton and AnimationPlayer. Each frame, evaluates the animation
 /// state and computes skinning matrices for GPU upload. The bone matrix buffer
 /// is used by skinned shaders to transform vertices.
+///
+/// Supports both StaticMesh (via base class) and SkinnedMesh (72-byte vertices
+/// with joint indices and weights). When a SkinnedMesh is set, vertex/index
+/// data is uploaded from it instead of the base StaticMesh.
 ///
 [EngineComponent("Rendering")]
 public class AnimatedModel : StaticModel
@@ -25,7 +30,24 @@ public class AnimatedModel : StaticModel
 	private int32 mMaxBones = 0;
 	private int mLastBoneCount = 0;
 
+	// Skinned mesh (72-byte vertices) — not owned
+	private SkinnedMesh mSkinnedMesh;
+
 	// ===== Properties =====
+
+	/// The skinned mesh with joint/weight data for skeletal animation.
+	/// When set, vertex/index uploads and batch generation use this instead of the base StaticMesh.
+	public SkinnedMesh SkinnedMesh
+	{
+		get => mSkinnedMesh;
+		set
+		{
+			mSkinnedMesh = value;
+			mBuffersDirty = true;
+			if (value != null)
+				BoundingBox = value.Bounds;
+		}
+	}
 
 	/// The skeleton for this animated model.
 	public Skeleton Skeleton
@@ -36,6 +58,8 @@ public class AnimatedModel : StaticModel
 			mSkeleton = value;
 			if (value != null)
 			{
+				if (mAnimPlayer != null)
+					delete mAnimPlayer;
 				mAnimPlayer = new AnimationPlayer(value);
 				mMaxBones = value.BoneCount;
 				mBoneBufferDirty = true;
@@ -172,7 +196,7 @@ public class AnimatedModel : StaticModel
 				mBoneBindGroup = null;
 			}
 
-			BufferDescriptor desc = .(dataSize, .Uniform | .CopyDst);
+			BufferDescriptor desc = .(dataSize, .Uniform | .CopyDst, .Upload);
 			if (device.CreateBuffer(&desc) case .Ok(let buf))
 				mBoneMatrixBuffer = buf;
 			else
@@ -199,20 +223,100 @@ public class AnimatedModel : StaticModel
 
 	// ===== Overrides =====
 
+	/// Uploads vertex/index data to GPU. When a SkinnedMesh is set, uploads its
+	/// 72-byte vertex data; otherwise falls through to base StaticModel upload.
+	public override Result<void> UploadToGPU(IDevice device)
+	{
+		if (mSkinnedMesh != null && mBuffersDirty)
+		{
+			if (mVertexBuffer != null) { delete mVertexBuffer; mVertexBuffer = null; }
+			if (mIndexBuffer != null) { delete mIndexBuffer; mIndexBuffer = null; }
+
+			let vertexData = mSkinnedMesh.GetVertexData();
+			let vertexSize = (uint64)(mSkinnedMesh.VertexCount * mSkinnedMesh.VertexSize);
+			if (vertexSize > 0 && vertexData != null)
+			{
+				BufferDescriptor vbDesc = .(vertexSize, .Vertex | .CopyDst);
+				if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
+				{
+					mVertexBuffer = vb;
+					device.Queue.WriteBuffer(vb, 0, Span<uint8>(vertexData, (int)vertexSize));
+				}
+				else
+					return .Err;
+			}
+
+			let indexData = mSkinnedMesh.GetIndexData();
+			let indexSize = (uint64)mSkinnedMesh.Indices.GetDataSize();
+			if (indexSize > 0 && indexData != null)
+			{
+				BufferDescriptor ibDesc = .(indexSize, .Index | .CopyDst);
+				if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
+				{
+					mIndexBuffer = ib;
+					device.Queue.WriteBuffer(ib, 0, Span<uint8>(indexData, (int)indexSize));
+				}
+				else
+					return .Err;
+			}
+
+			mBuffersDirty = false;
+			return .Ok;
+		}
+
+		return base.UploadToGPU(device);
+	}
+
 	public override void UpdateBatches(FrameInfo frameInfo)
 	{
 		// Update animation before generating batches
 		UpdateAnimation(frameInfo.TimeStep);
 
-		// Generate batches from base StaticModel
-		base.UpdateBatches(frameInfo);
-
-		// Attach bone matrix buffer reference to all batches for skinned rendering
-		if (mBoneMatrixBuffer != null)
+		if (mSkinnedMesh != null)
 		{
-			let batches = Batches;
-			for (var batch in ref batches)
-				batch.BoneMatrixBuffer = mBoneMatrixBuffer;
+			// Generate batches from skinned mesh
+			MutableBatches.Clear();
+
+			if (Node == null)
+				return;
+
+			let worldTransform = Node.WorldTransform;
+			let cameraPos = frameInfo.Camera != null ? frameInfo.Camera.Node.WorldPosition : Vector3.Zero;
+			let distance = Vector3.Distance(Node.WorldPosition, cameraPos);
+
+			let isIndexed = mIndexBuffer != null && mSkinnedMesh.Indices.GetDataSize() > 0;
+			for (int i = 0; i < mSkinnedMesh.SubMeshes.Count; i++)
+			{
+				let subMesh = mSkinnedMesh.SubMeshes[i];
+				SourceBatch batch = .()
+				{
+					WorldTransform = worldTransform,
+					Distance = distance,
+					StartIndex = isIndexed ? subMesh.startIndex : 0,
+					IndexCount = isIndexed ? subMesh.indexCount : 0,
+					VertexCount = isIndexed ? 0 : mSkinnedMesh.VertexCount,
+					VertexBuffer = mVertexBuffer,
+					IndexBuffer = isIndexed ? mIndexBuffer : null,
+					IndexBufferFormat = isIndexed ? (mSkinnedMesh.Indices.Format == .UInt16 ? .UInt16 : .UInt32) : .UInt16,
+					Material = GetMaterial(i),
+					Drawable = this,
+					BoneMatrixBuffer = mBoneMatrixBuffer
+				};
+				MutableBatches.Add(batch);
+			}
+		}
+		else
+		{
+			// Fall through to StaticModel path
+			base.UpdateBatches(frameInfo);
+
+			// Attach bone matrix buffer to all batches for skinned rendering
+			if (mBoneMatrixBuffer != null)
+			{
+				let batches = Batches;
+				for (var batch in ref batches)
+					batch.BoneMatrixBuffer = mBoneMatrixBuffer;
+			}
 		}
 	}
 }

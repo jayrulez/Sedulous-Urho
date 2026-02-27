@@ -41,6 +41,8 @@ cbuffer FrameUniforms : register(b0, space1)
     float4x4 ShadowMatrix3;       // Cascade 3 view-projection
     float4 ShadowSplits;          // xyzw = cascade 0-3 far distances (view-space Z)
     float4 ShadowParams;          // x = numCascades, y = bias, z = 1/atlasSize, w = enabled
+    float4 ShadowParams2;         // x = normalBias (texels), yzw = unused
+    float4 ShadowTexelSizes;      // xyzw = per-cascade world-space texel sizes (0-3)
     float4 IBLParams;             // x = diffuseIntensity, y = specularIntensity, z = prefilteredMipCount, w = enabled
 };
 
@@ -123,6 +125,16 @@ int GetShadowCascadeCount() { return (int)ShadowParams.x; }
 float GetShadowBias() { return ShadowParams.y; }
 float GetShadowTexelSize() { return ShadowParams.z; }
 bool IsShadowEnabled() { return ShadowParams.w > 0.5; }
+float GetShadowNormalBias() { return ShadowParams2.x; }
+
+// Returns the world-space texel size for the given cascade (for normal offset scaling).
+float GetCascadeTexelSize(int cascadeIndex)
+{
+    if (cascadeIndex == 0) return ShadowTexelSizes.x;
+    if (cascadeIndex == 1) return ShadowTexelSizes.y;
+    if (cascadeIndex == 2) return ShadowTexelSizes.z;
+    return ShadowTexelSizes.w;
+}
 
 // Returns the shadow cascade view-projection matrix for the given index.
 float4x4 GetShadowMatrix(int cascadeIndex)
@@ -144,7 +156,7 @@ int SelectCascade(float viewDepth)
     return 3;
 }
 
-// Samples the shadow map with PCF 2x2 for soft shadows.
+// Samples the shadow map with 5x5 PCF for smooth soft shadows.
 float SampleShadowPCF(float3 shadowCoord, int cascadeIndex)
 {
     float bias = GetShadowBias();
@@ -157,41 +169,48 @@ float SampleShadowPCF(float3 shadowCoord, int cascadeIndex)
 
     // Map from [-1,1] clip space to [0,1] UV space
     float2 uv = shadowCoord.xy * 0.5 + 0.5;
-    uv.y = 1.0 - uv.y; // Flip Y for Vulkan
     // Scale into cascade atlas region
     uv.x = atlasOffsetX + uv.x * cascadeWidth;
 
-    float depth = shadowCoord.z - bias;
+    float depth = saturate(shadowCoord.z) - bias;
 
-    // 2x2 PCF
+    // 5x5 PCF for smooth shadow edges
     float shadow = 0;
     [unroll]
-    for (int y = -1; y <= 1; y += 2)
+    for (int y = -2; y <= 2; y++)
     {
         [unroll]
-        for (int x = -1; x <= 1; x += 2)
+        for (int x = -2; x <= 2; x++)
         {
-            float2 offset = float2(x, y) * texelSize * 0.5;
+            float2 offset = float2(x, y) * texelSize;
             shadow += ShadowAtlas.SampleCmpLevelZero(ShadowSampler, uv + offset, depth);
         }
     }
-    return shadow * 0.25;
+    return shadow / 25.0;
 }
 
-// Computes the shadow factor for a world-space position (1 = lit, 0 = shadowed).
-float ComputeShadowFactor(float3 worldPos)
+// Computes the shadow factor for a world-space position with normal offset bias.
+// N = surface world normal, lightDir = normalized direction TO the light.
+float ComputeShadowFactor(float3 worldPos, float3 N, float3 lightDir)
 {
     if (!IsShadowEnabled())
         return 1.0;
 
-    // Compute view-space depth for cascade selection
+    // Compute view-space depth for cascade selection.
     float4 viewPos = mul(float4(worldPos, 1.0), View);
-    float viewDepth = viewPos.z;
+    float viewDepth = -viewPos.z;
     int cascade = SelectCascade(viewDepth);
+
+    // Normal offset bias: push sample position along surface normal to reduce acne.
+    // Offset is larger when surface is nearly perpendicular to light (grazing angles).
+    float NdotL = saturate(dot(N, lightDir));
+    float normalBias = GetShadowNormalBias();
+    float cascadeTexel = GetCascadeTexelSize(cascade);
+    float3 offsetPos = worldPos + N * (normalBias * cascadeTexel * (1.0 - NdotL));
 
     // Transform to shadow clip space
     float4x4 shadowMat = GetShadowMatrix(cascade);
-    float4 shadowClip = mul(float4(worldPos, 1.0), shadowMat);
+    float4 shadowClip = mul(float4(offsetPos, 1.0), shadowMat);
     float3 shadowCoord = shadowClip.xyz / shadowClip.w;
 
     // Out of shadow map bounds → fully lit
@@ -199,6 +218,12 @@ float ComputeShadowFactor(float3 worldPos)
         return 1.0;
 
     return SampleShadowPCF(shadowCoord, cascade);
+}
+
+// Overload without normal (for compatibility — no normal offset).
+float ComputeShadowFactor(float3 worldPos)
+{
+    return ComputeShadowFactor(worldPos, float3(0, 1, 0), float3(0, 1, 0));
 }
 
 // ============================================================

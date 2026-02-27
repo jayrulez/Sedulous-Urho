@@ -34,9 +34,9 @@ public class StaticModel : Drawable
 	private StaticMesh mMesh;
 
 	// GPU buffers for primary mesh (owned)
-	private IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
-	private IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
-	private bool mBuffersDirty = true;
+	protected IBuffer mVertexBuffer ~ { if (_ != null) delete _; };
+	protected IBuffer mIndexBuffer ~ { if (_ != null) delete _; };
+	protected bool mBuffersDirty = true;
 
 	// LOD levels (beyond LOD 0)
 	private List<ModelLodLevel> mLodLevels = new .() ~ {
@@ -80,6 +80,9 @@ public class StaticModel : Drawable
 
 	/// The GPU index buffer for the primary LOD.
 	public IBuffer IndexBuffer => mIndexBuffer;
+
+	/// Whether the GPU buffers need to be (re-)uploaded.
+	public bool BuffersDirty => mBuffersDirty;
 
 	/// Number of LOD levels (including the primary mesh as LOD 0).
 	public int32 LodLevelCount => 1 + (int32)mLodLevels.Count;
@@ -196,6 +199,7 @@ public class StaticModel : Drawable
 			activeIB = lod.IndexBuffer != null ? lod.IndexBuffer : mIndexBuffer;
 		}
 
+		let isIndexed = activeIB != null && activeMesh.Indices.GetDataSize() > 0;
 		for (int i = 0; i < activeMesh.SubMeshes.Count; i++)
 		{
 			let subMesh = activeMesh.SubMeshes[i];
@@ -203,11 +207,12 @@ public class StaticModel : Drawable
 			{
 				WorldTransform = worldTransform,
 				Distance = distance,
-				StartIndex = subMesh.startIndex,
-				IndexCount = subMesh.indexCount,
+				StartIndex = isIndexed ? subMesh.startIndex : 0,
+				IndexCount = isIndexed ? subMesh.indexCount : 0,
+				VertexCount = isIndexed ? 0 : activeMesh.Vertices.VertexCount,
 				VertexBuffer = activeVB,
-				IndexBuffer = activeIB,
-				IndexBufferFormat = activeMesh.Indices.Format == .UInt16 ? .UInt16 : .UInt32,
+				IndexBuffer = isIndexed ? activeIB : null,
+				IndexBufferFormat = isIndexed ? (activeMesh.Indices.Format == .UInt16 ? .UInt16 : .UInt32) : .UInt16,
 				Material = GetMaterial(i),
 				Drawable = this
 			};
@@ -217,7 +222,7 @@ public class StaticModel : Drawable
 
 	/// Uploads mesh data to GPU buffers for all LOD levels.
 	/// Must be called with a valid device before rendering.
-	public Result<void> UploadToGPU(IDevice device)
+	public virtual Result<void> UploadToGPU(IDevice device)
 	{
 		// Upload primary mesh (LOD 0)
 		if (mMesh != null && mBuffersDirty)

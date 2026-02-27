@@ -210,12 +210,18 @@ float4 main(PSInput input) : SV_Target
     // Non-metals: 0.04, metals: albedo color
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
 
-    // Shadow factor (applied to first directional light)
-    float shadowFactor = ComputeShadowFactor(input.WorldPosition);
+    // Light count (used for shadows and lighting loop)
+    int lightCount = min(GetLightCount(), MAX_LIGHTS);
+
+    // Shadow factor with normal offset bias (applied to first directional light)
+    // Use first light's direction for normal offset if it's directional
+    float3 shadowLightDir = float3(0, 1, 0);
+    if (lightCount > 0 && (int)Lights[0].TypeAndParams.x == LIGHT_DIRECTIONAL)
+        shadowLightDir = -normalize(Lights[0].DirectionAndSpotAngle.xyz);
+    float shadowFactor = ComputeShadowFactor(input.WorldPosition, N, shadowLightDir);
 
     // Accumulate lighting
     float3 Lo = float3(0, 0, 0);
-    int lightCount = min(GetLightCount(), MAX_LIGHTS);
     for (int i = 0; i < lightCount; i++)
     {
         float3 lightContrib = ComputeLight(Lights[i], input.WorldPosition, N, V,

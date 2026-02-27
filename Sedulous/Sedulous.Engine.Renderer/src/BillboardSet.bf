@@ -51,6 +51,9 @@ public class BillboardSet : Drawable
 	private IBuffer[MAX_FRAMES] mVertexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private IBuffer[MAX_FRAMES] mIndexBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private int32[MAX_FRAMES] mLastEnabledCounts;
+	// Deferred deletion: old buffers kept alive until GPU is guaranteed done with them
+	private List<(IBuffer buffer, int32 frameQueued)> mPendingDeletes = new .() ~ { for (var e in _) delete e.buffer; delete _; };
+	private int32 mDeferFrameCounter = 0;
 	private uint8[] mVertexData ~ delete _;
 	private uint8[] mIndexData ~ delete _;
 	private List<int32> mSortedIndices = new .() ~ delete _;
@@ -195,25 +198,34 @@ public class BillboardSet : Drawable
 		let vertexDataSize = (uint64)(enabledCount * 4 * VERTEX_SIZE);
 		let indexDataSize = (uint64)(enabledCount * 6 * 2);
 
-		// Recreate this frame's buffers if enabled count changed
-		if (mVertexBuffers[fi] == null || mLastEnabledCounts[fi] != enabledCount)
-		{
-			if (mVertexBuffers[fi] != null) { delete mVertexBuffers[fi]; mVertexBuffers[fi] = null; }
-			if (mIndexBuffers[fi] != null) { delete mIndexBuffers[fi]; mIndexBuffers[fi] = null; }
+		// Flush deferred deletes that have aged past the in-flight window
+		FlushDeferredDeletes();
 
-			BufferDescriptor vbDesc = .(vertexDataSize, .Vertex | .CopyDst);
+		// Only recreate buffers when capacity is insufficient (grow-only)
+		if (mVertexBuffers[fi] == null || enabledCount > mLastEnabledCounts[fi])
+		{
+			// Defer deletion of old buffers — GPU may still be using them
+			if (mVertexBuffers[fi] != null) { mPendingDeletes.Add((mVertexBuffers[fi], mDeferFrameCounter)); mVertexBuffers[fi] = null; }
+			if (mIndexBuffers[fi] != null) { mPendingDeletes.Add((mIndexBuffers[fi], mDeferFrameCounter)); mIndexBuffers[fi] = null; }
+
+			// Allocate with 50% headroom to reduce reallocations
+			let allocCount = enabledCount + enabledCount / 2;
+			let allocVBSize = (uint64)(allocCount * 4 * VERTEX_SIZE);
+			let allocIBSize = (uint64)(allocCount * 6 * 2);
+
+			BufferDescriptor vbDesc = .(allocVBSize, .Vertex | .CopyDst, .Upload);
 			if (device.CreateBuffer(&vbDesc) case .Ok(let vb))
 				mVertexBuffers[fi] = vb;
 			else
 				return .Err;
 
-			BufferDescriptor ibDesc = .(indexDataSize, .Index | .CopyDst);
+			BufferDescriptor ibDesc = .(allocIBSize, .Index | .CopyDst, .Upload);
 			if (device.CreateBuffer(&ibDesc) case .Ok(let ib))
 				mIndexBuffers[fi] = ib;
 			else
 				return .Err;
 
-			mLastEnabledCounts[fi] = enabledCount;
+			mLastEnabledCounts[fi] = allocCount;
 		}
 
 		if (mVertexData != null && vertexDataSize > 0)
@@ -244,6 +256,18 @@ public class BillboardSet : Drawable
 	}
 
 	// ===== Private =====
+
+	/// Flushes deferred buffer deletes after enough frames have passed
+	/// to guarantee the GPU is done with them.
+	private void FlushDeferredDeletes()
+	{
+		mDeferFrameCounter++;
+		while (mPendingDeletes.Count > 0 && mDeferFrameCounter - mPendingDeletes[0].frameQueued >= FrameConfig.DELETION_DEFER_FRAMES)
+		{
+			delete mPendingDeletes[0].buffer;
+			mPendingDeletes.RemoveAt(0);
+		}
+	}
 
 	private void BuildGeometry(Vector3 cameraPos, Vector3 cameraRight, Vector3 cameraUp, int32 enabledCount)
 	{

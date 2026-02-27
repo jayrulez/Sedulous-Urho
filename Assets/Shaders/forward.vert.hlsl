@@ -1,7 +1,7 @@
 // PBR Forward Vertex Shader
 // Transforms mesh vertices to clip space and passes world-space data to the fragment shader.
 // Vertex layout: Position(float3) + Normal(float3) + UV(float2) + Color(ubyte4) + Tangent(float3) = 48 bytes
-// SKINNED variant adds: JointIndices(uint4) + JointWeights(float4) = 80 bytes
+// SKINNED variant adds: JointIndices(ushort4→uint4) + JointWeights(float4) = 72 bytes
 // INSTANCED variant reads world matrix from instance buffer (4 x float4) instead of per-object UBO
 #include "common.hlsli"
 
