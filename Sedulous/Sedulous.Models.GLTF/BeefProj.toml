@@ -1,5 +1,12 @@
 FileVersion = 1
-Dependencies = {corlib = "*", "Sedulous.Foundation" = "*", "Sedulous.Models" = "*", "Sedulous.Imaging" = "*", cgltf-Beef = "*"}
 
 [Project]
 Name = "Sedulous.Models.GLTF"
+TargetType = "BeefLib"
+
+[Dependencies]
+corlib = "*"
+"Sedulous.Foundation.Mathematics" = "*"
+"Sedulous.Models" = "*"
+"Sedulous.Imaging" = "*"
+"cgltf-Beef" = "*"

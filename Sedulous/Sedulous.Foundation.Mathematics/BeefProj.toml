@@ -1,7 +1,6 @@
 FileVersion = 1
-Dependencies = {corlib = "*", corlib = "*", "Sedulous.Foundation" = "*"}
+Dependencies = {corlib = "*", "Sedulous.Foundation" = "*"}
 
 [Project]
 Name = "Sedulous.Foundation.Mathematics"
 TargetType = "BeefLib"
-StartupObject = "Sedulous.Foundation.Mathematics.Program"

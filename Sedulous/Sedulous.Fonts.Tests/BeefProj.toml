@@ -7,5 +7,6 @@ TargetType = "BeefTest"
 [Dependencies]
 corlib = "*"
 "Sedulous.Foundation" = "*"
+"Sedulous.Foundation.Mathematics" = "*"
 "Sedulous.Fonts" = "*"
 "Sedulous.Fonts.TTF" = "*"

@@ -1,13 +1,6 @@
 FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Serialization" = "*", "Sedulous.Serialization.OpenDDL" = "*", "Sedulous.Serialization.Xml" = "*", "Sedulous.OpenDDL" = "*", "Sedulous.Xml" = "*", "Sedulous.Foundation.Mathematics" = "*"}
 
 [Project]
 Name = "Sedulous.Serialization.Tests"
 TargetType = "BeefTest"
-
-[Dependencies]
-corlib = "*"
-"Sedulous.Serialization" = "*"
-"Sedulous.Serialization.OpenDDL" = "*"
-"Sedulous.Serialization.Xml" = "*"
-"Sedulous.OpenDDL" = "*"
-"Sedulous.Xml" = "*"
