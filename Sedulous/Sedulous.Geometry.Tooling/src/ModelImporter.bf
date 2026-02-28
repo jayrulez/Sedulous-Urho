@@ -5,10 +5,10 @@ using Sedulous.Foundation.Mathematics;
 using Sedulous.Geometry;
 using Sedulous.Models;
 using Sedulous.Imaging;
-using Sedulous.Geometry.Resources;
-using Sedulous.Resources;
 using Sedulous.Engine.Animation;
 using Sedulous.Engine.Animation.Resources;
+using Sedulous.Geometry.Resources;
+using Sedulous.Resources;
 
 namespace Sedulous.Geometry.Tooling;
 

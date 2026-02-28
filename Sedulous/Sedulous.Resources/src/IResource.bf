@@ -14,6 +14,12 @@ interface IResource
 	/// Gets the current reference count.
 	int RefCount { get; }
 
+	/// Gets the loading state of this resource.
+	ResourceState State { get; }
+
+	/// Gets the file path of this resource.
+	StringView Path { get; }
+
 	/// Increments the reference count.
 	void AddRef();
 

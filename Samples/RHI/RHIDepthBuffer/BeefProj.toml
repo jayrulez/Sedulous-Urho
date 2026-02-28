@@ -1,5 +1,5 @@
 FileVersion = 1
-Dependencies = {corlib = "*", SampleFramework = "*", "Sedulous.Shell" = "*", "Sedulous.Shell.SDL3" = "*", "Sedulous.RHI" = "*", "Sedulous.RHI.Vulkan" = "*"}
+Dependencies = {corlib = "*", SampleFramework = "*", "Sedulous.Shell" = "*", "Sedulous.Shell.SDL3" = "*", "Sedulous.Foundation" = "*", "Sedulous.RHI" = "*", "Sedulous.RHI.Vulkan" = "*"}
 
 [Project]
 Name = "RHIDepthBuffer"

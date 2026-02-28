@@ -1,5 +1,5 @@
 FileVersion = 1
-Dependencies = {corlib = "*", "Sedulous.Geometry" = "*", "Sedulous.Models" = "*", "Sedulous.Imaging" = "*", "Sedulous.Serialization" = "*", "Sedulous.Serialization.OpenDDL" = "*", "Sedulous.Materials" = "*", "Sedulous.Resources" = "*", corlib = "*", "Sedulous.Textures" = "*", "Sedulous.Engine.Animation" = "*"}
+Dependencies = {corlib = "*", "Sedulous.Foundation.Mathematics" = "*", "Sedulous.Geometry" = "*", "Sedulous.Models" = "*", "Sedulous.Imaging" = "*", "Sedulous.Serialization" = "*", "Sedulous.Serialization.OpenDDL" = "*", "Sedulous.Foundation.Mathematics.Serialization" = "*", "Sedulous.Engine.Animation" = "*", "Sedulous.Materials" = "*", "Sedulous.Resources" = "*", "Sedulous.Textures" = "*"}
 
 [Project]
 Name = "Sedulous.Geometry.Tooling"

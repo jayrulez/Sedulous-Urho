@@ -7,8 +7,10 @@ using Sedulous.Serialization;
 using Sedulous.Serialization.OpenDDL;
 using Sedulous.OpenDDL;
 using Sedulous.Foundation.Mathematics;
+using Sedulous.Engine.Animation;
+using Sedulous.Engine.Animation.Resources;
 
-using static Sedulous.Serialization.MathSerializerExtensions;
+using static Sedulous.Foundation.Mathematics.MathSerializerExtensions;
 using static Sedulous.Resources.ResourceSerializerExtensions;
 
 namespace Sedulous.Geometry.Resources;

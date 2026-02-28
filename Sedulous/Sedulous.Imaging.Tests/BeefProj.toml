@@ -1,10 +1,6 @@
 FileVersion = 1
+Dependencies = {corlib = "*", "Sedulous.Imaging" = "*", "Sedulous.Foundation" = "*"}
 
 [Project]
 Name = "Sedulous.Imaging.Tests"
 TargetType = "BeefTest"
-
-[Dependencies]
-corlib = "*"
-"Sedulous.Imaging" = "*"
-"Sedulous.Foundation" = "*"

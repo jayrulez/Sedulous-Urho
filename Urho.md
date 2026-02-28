@@ -969,3 +969,51 @@ Sedulous/
 | All objects rendered white | `Color.R/G/B` returns `uint8` (0-255). `UploadFrameUniforms` passed raw uint8 values to float uniforms without dividing by 255. Ambient `(0.2, 0.2, 0.2)` became `(51, 51, 51)` on the GPU, saturating everything to white. | Normalize all Color→float conversions: `(float)color.R / 255.0f` for AmbientColor, FogColor, and Light ColorAndIntensity. (`Renderer.bf:1405,1408,1423`) |
 | Crash on shutdown (use-after-free) | In Beef, Node field destructors run in reverse declaration order: `mComponents` (containing Octree) destroyed before `mChildren` (containing Drawables). Drawables' `OnRemoved()` called `mOctree.Remove(this)` on the deleted Octree. | Added `Octree.OnRemoved()` that nulls out all drawables' `OctreeRef` before the Octree is destroyed. (`Octree.bf`) |
 | `BoundingFrustum.Contains(Vector3)` bug | Line 66: `plane.Normal.Z + point.Z` uses addition instead of multiplication. Not affecting rendering since `FrustumCuller` does its own math. | Known issue — not yet fixed (only affects `BoundingFrustum.Contains`, not the main culling path). |
+
+
+
+=====================================================================================================
+
+Fully Covered (architectural parity or better)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                - Scene graph (Node/Component/Scene + serialization)
+  - All major drawable types (StaticModel, AnimatedModel, BillboardSet, ParticleEmitter, Skybox, Terrain, DecalSet, RibbonTrail, Sprite2D, ProceduralGeometry)                                                                                                                   - Lighting (directional/point/spot, shadows, zones/fog)                                                                                                                                                                                                                        - PBR materials + shader system
+  - Octree + frustum culling                                                                                                                                                                                                                                                     - Post-processing (tone mapping, bloom framework)                                                                                                                                                                                                                              - IBL (reflection probes, environment maps, lightmaps)
+  - GPU instancing
+  - Physics (Jolt: rigid bodies, shapes, raycasts, character controller API)
+  - Navigation (navmesh, crowd, agents, obstacles, off-mesh connections)
+  - Audio (3D positional, streaming, WAV/Vorbis/MP3/FLAC)
+  - Animation (skeletal, blend trees, state machines, layers, property animation)
+  - Resource system (async loading, hot-reload, GLTF/FBX models)
+  - Input (keyboard, mouse, touch, gamepad)
+  - Debug tools (debug renderer, profiler, debug HUD, memory budget)
+  - Editor (native, with undo/redo, hierarchy, inspector)
+
+  Intentional Architectural Differences (modernizations, not gaps)
+
+  - RenderGraph instead of XML RenderPaths
+  - Typed events instead of StringHash+VariantMap
+  - Beef generics instead of Variant system
+  - PipelineConfig instead of Technique/Pass multi-pass system
+  - AnimationGraph instead of AnimationController
+
+  Genuine Gaps Worth Noting
+
+  Would matter for some projects:
+  - Deferred rendering — limits efficient dynamic light count
+  - Convex hull / triangle mesh collision shapes — physics limited to primitives
+  - Constraint component — API exists but no scene graph wrapper
+  - IK system — no FABRIK/two-bone for foot placement, reaching
+  - LogicComponent — no per-frame update base class (must subscribe to events manually)
+  - DynamicNavigationMesh — no tile-cache incremental updates
+  - ValueAnimation — can't animate arbitrary attributes by name at runtime
+
+  Nice to have but not critical:
+  - Software occlusion culling
+  - Light cookies/masks
+  - Auto-exposure / FXAA post-processes
+  - StaticModelGroup (CPU-side batching)
+  - PackageFile (.pak archives)
+  - JSON parser
+  - Localization system
+  - In-engine console
+
+  Overall, the core engine feature set is very solid. The gaps are mostly in advanced/niche areas. The biggest real-world ones would be convex hull collision shapes, constraint components, and IK if you're doing character-heavy games.

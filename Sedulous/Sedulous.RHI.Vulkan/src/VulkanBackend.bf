@@ -332,7 +332,7 @@ class VulkanBackend : IBackend
 			StringView message = .(pCallbackData.pMessage);
 			Console.Error.WriteLine(scope $"[Vulkan] {message}");
 
-			if(message.Contains("vkDestroyBuffer()") || message.Contains("can't be called on VkImageView"))
+			if(message.Contains("vkFreeDescriptorSets()") || message.Contains("can't be called on VkImageView"))
 			{
 				//int x = 1;
 			}

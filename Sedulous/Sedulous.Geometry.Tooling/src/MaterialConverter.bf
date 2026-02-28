@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using Sedulous.Models;
+using Sedulous.Foundation.Mathematics;
 using Sedulous.Materials;
 using Sedulous.Shaders;
 using Sedulous.Resources;
@@ -41,18 +42,32 @@ static class MaterialConverter
 		case .Mask:
 			mat.PipelineConfig.BlendMode = .Opaque;
 			mat.PipelineConfig.DepthMode = .ReadWrite;
+			mat.ShaderFlags |= .AlphaTest;
+			mat.PipelineConfig.ShaderFlags |= .AlphaTest;
 		case .Blend:
 			mat.PipelineConfig.BlendMode = .AlphaBlend;
 			mat.PipelineConfig.DepthMode = .ReadOnly;
 		}
 
 		mat.PipelineConfig.CullMode = modelMat.DoubleSided ? .None : .Back;
+		if (modelMat.DoubleSided)
+		{
+			mat.ShaderFlags |= .DoubleSided;
+			mat.PipelineConfig.ShaderFlags |= .DoubleSided;
+		}
 
 		// Enable normal mapping if the model has a normal texture
 		if (modelMat.NormalTextureIndex >= 0)
 		{
 			mat.ShaderFlags |= .NormalMap;
 			mat.PipelineConfig.ShaderFlags |= .NormalMap;
+		}
+
+		// Enable emissive if the model has an emissive texture
+		if (modelMat.EmissiveTextureIndex >= 0)
+		{
+			mat.ShaderFlags |= .Emissive;
+			mat.PipelineConfig.ShaderFlags |= .Emissive;
 		}
 
 		// Create resource wrapper

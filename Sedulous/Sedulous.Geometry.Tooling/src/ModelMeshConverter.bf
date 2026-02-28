@@ -1,8 +1,8 @@
 using System;
 using System.Collections;
+using Sedulous.Foundation.Mathematics;
 using Sedulous.Geometry;
 using Sedulous.Models;
-using Sedulous.Foundation.Mathematics;
 
 namespace Sedulous.Geometry.Tooling;
 

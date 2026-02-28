@@ -1,10 +1,9 @@
 using System;
 using Sedulous.Serialization;
-using Sedulous.Foundation.Mathematics;
 
-namespace Sedulous.Serialization;
+namespace Sedulous.Foundation.Mathematics;
 
-using static Sedulous.Serialization.MathSerializerExtensions;
+using static Sedulous.Foundation.Mathematics.MathSerializerExtensions;
 
 /// Extension methods for serializing math types.
 static class MathSerializerExtensions

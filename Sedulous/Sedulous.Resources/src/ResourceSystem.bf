@@ -139,6 +139,10 @@ class ResourceSystem
 		if (manager == null)
 			return .Err(.ManagerNotFound);
 
+		// Mark as ready since it's being added already loaded
+		if (let res = resource as Resource)
+			res.SetState(.Ready);
+
 		var handle = ResourceHandle<IResource>(resource);
 
 		if (cache)
@@ -176,9 +180,18 @@ class ResourceSystem
 		// Load resource
 		let loadResult = manager.Load(path);
 		if (loadResult case .Err(let error))
+		{
 			return .Err(error);
+		}
 
 		let handle = loadResult.Value;
+
+		// Set path and state on the loaded resource
+		if (let res = handle.Resource as Resource)
+		{
+			res.SetPath(path);
+			res.SetState(.Ready);
+		}
 
 		// Cache if requested
 		if (cacheIfLoaded)

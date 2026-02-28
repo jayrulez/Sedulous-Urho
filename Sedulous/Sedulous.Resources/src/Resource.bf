@@ -3,17 +3,24 @@ using System.Threading;
 using System.Diagnostics;
 using System.Reflection;
 using Sedulous.Serialization;
+using Sedulous.Foundation.Core;
 
 namespace Sedulous.Resources;
 
 /// Abstract base class for all resources.
-/// Provides reference counting and serialization support.
+/// Provides reference counting, serialization support, state tracking, and events.
 abstract class Resource : IResource, ISerializable
 {
 	private int32 mRefCount = 0;
 	private Guid mId;
 	private String mName = new .() ~ delete _;
 	private String mResourceType = new .() ~ delete _;
+	private ResourceState mState = .Empty;
+	private String mPath = new .() ~ delete _;
+	private uint64 mFileSize = 0;
+	private EventAccessor<delegate void(ResourceState, ResourceState, Resource)> mStateChanged = new .() ~ delete _;
+
+	// ---- Identity ----
 
 	/// Gets or sets the unique identifier.
 	public Guid Id
@@ -35,6 +42,31 @@ abstract class Resource : IResource, ISerializable
 	/// Gets the current reference count.
 	public int RefCount => mRefCount;
 
+	// ---- State Tracking ----
+
+	/// The current loading state.
+	public ResourceState State => mState;
+
+	/// Whether the resource is in the Empty (not loaded) state.
+	public bool IsEmpty => mState == .Empty;
+
+	/// Whether the resource has been loaded and is ready for use.
+	public bool IsReady => mState == .Ready;
+
+	/// Whether loading has failed.
+	public bool IsFailure => mState == .Failure;
+
+	/// The file path of this resource.
+	public StringView Path => mPath;
+
+	/// The size of the loaded resource data in bytes.
+	public uint64 FileSize => mFileSize;
+
+	/// Subscribe to state change notifications.
+	public EventAccessor<delegate void(ResourceState, ResourceState, Resource)> OnStateChanged => mStateChanged;
+
+	// ---- Construction ----
+
 	public this()
 	{
 		mId = Guid.Create();
@@ -45,6 +77,8 @@ abstract class Resource : IResource, ISerializable
 	{
 		Debug.Assert(mRefCount == 0, "Resource deleted with non-zero ref count");
 	}
+
+	// ---- Reference Counting ----
 
 	/// Increments the reference count.
 	public void AddRef()
@@ -77,6 +111,29 @@ abstract class Resource : IResource, ISerializable
 		let refCount = Interlocked.Decrement(ref mRefCount);
 		Debug.Assert(refCount >= 0);
 		return refCount;
+	}
+
+	// ---- State Management ----
+
+	/// Set the loading state. Fires OnStateChanged event if state changes.
+	public void SetState(ResourceState newState)
+	{
+		let oldState = mState;
+		mState = newState;
+		if (oldState != newState)
+			mStateChanged.[Friend]Invoke(oldState, newState, this);
+	}
+
+	/// Set the file path of this resource.
+	public void SetPath(StringView path)
+	{
+		mPath.Set(path);
+	}
+
+	/// Set the file size of this resource.
+	public void SetFileSize(uint64 size)
+	{
+		mFileSize = size;
 	}
 
 	// ---- ISerializable ----

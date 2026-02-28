@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using Sedulous.Resources;
-using Sedulous.Geometry;
 using Sedulous.Serialization;
 using Sedulous.Serialization.OpenDDL;
 using Sedulous.OpenDDL;
@@ -9,7 +8,7 @@ using Sedulous.Engine.Animation;
 using Sedulous.Foundation.Mathematics;
 using Sedulous.Engine.Animation;
 
-using static Sedulous.Serialization.MathSerializerExtensions;
+using static Sedulous.Foundation.Mathematics.MathSerializerExtensions;
 
 namespace Sedulous.Engine.Animation.Resources;
 

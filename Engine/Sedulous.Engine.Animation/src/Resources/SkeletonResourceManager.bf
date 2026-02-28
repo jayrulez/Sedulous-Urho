@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using Sedulous.Resources;
-using Sedulous.Geometry;
 using Sedulous.Engine.Animation;
 
 namespace Sedulous.Engine.Animation.Resources;
