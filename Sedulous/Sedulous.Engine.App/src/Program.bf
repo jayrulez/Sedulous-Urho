@@ -23,6 +23,7 @@ using Sedulous.RHI;
 using Sedulous.Imaging.SDL;
 using Sedulous.Profiler;
 using Sedulous.Jobs;
+using Sedulous.Engine.Navigation;
 using System.Threading;
 
 namespace Sedulous.Engine.App;
@@ -107,6 +108,30 @@ class DemoApp : SedulousApp
 		delete _;
 	};
 
+	// Skybox
+	private ITexture mSkyboxTexture;
+	private ITextureView mSkyboxTextureView;
+
+	// Ribbon trail
+	private Node mTrailNode;
+	private float mTrailAngle = 0;
+
+	// Post-processing
+	private PostProcessStack mPostProcessStack;
+	private ToneMapEffect mToneMapEffect;
+
+	// Additional materials for new features
+	private Material mTrailMaterial;
+	private Material mDecalMaterial;
+
+	// Navigation
+	private NavigationMesh mNavMesh;
+	private CrowdManager mCrowdManager;
+	private List<CrowdAgent> mCrowdAgents = new .() ~ delete _;
+	private List<Node> mAgentNodes = new .() ~ delete _;
+	private float mNavTargetTimer = 0;
+	private List<Vector3> mDebugPath = new .() ~ delete _;
+
 	protected override void Setup()
 	{
 		Parameters.WindowTitle = "Sedulous - Static Scene";
@@ -179,9 +204,36 @@ class DemoApp : SedulousApp
 		// --- 3D Models (static + animated, loaded asynchronously) ---
 		StartModelLoading();
 
+		// --- Point & Spot Lights ---
+		CreatePointAndSpotLights();
+
+		// --- Zone with Fog ---
+		CreateZone();
+
+		// --- Terrain ---
+		//CreateTerrain();
+
+		// --- Skybox ---
+		CreateSkybox();
+
+		// --- Procedural Geometry ---
+		CreateProceduralGeometry();
+
+		// --- Decals ---
+		CreateDecals();
+
+		// --- Ribbon Trail ---
+		CreateRibbonTrail();
+
+		// --- Navigation ---
+		SetupNavigation();
+
 		// --- Viewport ---
 		mViewport = new Viewport(mScene, camera);
 		mRenderer.SetViewport(0, mViewport);
+
+		// --- Post-Processing (Tone Mapping) ---
+		SetupPostProcessing();
 
 		// --- Event Subscriptions ---
 		Engine.OnUpdate.Subscribe(new => OnUpdate);
@@ -778,12 +830,452 @@ class DemoApp : SedulousApp
 		return .Err;
 	}
 
+	// =====================================================================
+	// New Feature Methods (uncomment calls in Start() one at a time)
+	// =====================================================================
+
+	private void CreatePointAndSpotLights()
+	{
+		// Blue-ish point light
+		{
+			let node = mScene.CreateChild("PointLight");
+			node.Position = .(5, 4, 5);
+			let light = node.CreateComponent<Light>();
+			light.LightType = .Point;
+			light.LightColor = Color(0.4f, 0.6f, 1.0f, 1.0f);
+			light.Brightness = 2.0f;
+			light.Range = 15.0f;
+		}
+
+		// Yellow spot light aimed downward
+		{
+			let node = mScene.CreateChild("SpotLight");
+			node.Position = .(-5, 8, 0);
+			let dir = Vector3.Normalize(.(0.0f, -1.0f, 0.2f));
+			let worldMat = Matrix.CreateWorld(.Zero, dir, .Up);
+			node.Rotation = Quaternion.CreateFromRotationMatrix(worldMat);
+
+			let light = node.CreateComponent<Light>();
+			light.LightType = .Spot;
+			light.LightColor = Color(1.0f, 0.9f, 0.5f, 1.0f);
+			light.Brightness = 2.0f;
+			light.Range = 20.0f;
+			light.SpotFov = 60.0f * (Math.PI_f / 180.0f);
+			light.CastShadowsLight = true;
+		}
+	}
+
+	private void CreateZone()
+	{
+		let zoneNode = mScene.CreateChild("Zone");
+		let zone = zoneNode.CreateComponent<Zone>();
+		zone.AmbientColor = Color(0.25f, 0.25f, 0.3f, 1.0f);
+		zone.FogColor = Color(0.5f, 0.6f, 0.7f, 1.0f);
+		zone.FogStart = 40.0f;
+		zone.FogEnd = 120.0f;
+	}
+
+	private Material mTerrainMat ~ delete _;
+
+	private void CreateTerrain()
+	{
+		let terrainNode = mScene.CreateChild("Terrain");
+		terrainNode.Position = .(-30, -1, -30);
+
+		let terrain = terrainNode.CreateComponent<Terrain>();
+		terrain.Spacing = .(1.0f, 5.0f, 1.0f);
+
+		// Generate procedural heightmap (65x65)
+		int32 mapSize = 65;
+		let heights = new float[mapSize * mapSize];
+		defer delete heights;
+
+		for (int32 z = 0; z < mapSize; z++)
+		{
+			for (int32 x = 0; x < mapSize; x++)
+			{
+				float fx = (float)x / (float)mapSize;
+				float fz = (float)z / (float)mapSize;
+				// Rolling hills using sine waves
+				float h = 0.0f;
+				h += Math.Sin(fx * Math.PI_f * 2.0f) * 0.3f;
+				h += Math.Sin(fz * Math.PI_f * 3.0f) * 0.2f;
+				h += Math.Sin((fx + fz) * Math.PI_f * 4.0f) * 0.1f;
+				h = h * 0.5f + 0.5f; // Normalize to [0, 1]
+				heights[z * mapSize + x] = h;
+			}
+		}
+
+		terrain.SetHeightMap(Span<float>(&heights[0], mapSize * mapSize), mapSize, mapSize);
+
+		// Green-brown ground material — terrain uses MeshNoTangent (32 bytes: Pos+Normal+UV)
+		mTerrainMat = scope MaterialBuilder("TerrainMat")
+			.Shader("terrain")
+			.VertexLayout(.MeshNoTangent)
+			.Color("BaseColor", .(1, 1, 1, 1))
+			.Float("Metallic", 0.0f)
+			.Float("Roughness", 0.5f)
+			.Float("AO", 1.0f)
+			.Float("AlphaCutoff", 0.0f)
+			.Color("EmissiveColor", .(0, 0, 0, 0))
+			.Texture("AlbedoMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Texture("NormalMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Texture("MetallicRoughnessMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Texture("OcclusionMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Texture("EmissiveMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Sampler("MainSampler", mRenderer.MaterialSystem.DefaultSampler)
+			.Build();
+
+		let terrainInst = new MaterialInstance(mTerrainMat);
+		terrainInst.SetColor("BaseColor", .(0.3f, 0.45f, 0.2f, 1.0f));
+		terrainInst.SetFloat("Roughness", 0.9f);
+		mMaterialInstances.Add(terrainInst);
+		if (mRenderer.MaterialSystem.PrepareInstance(terrainInst) case .Ok)
+			terrain.Material = terrainInst;
+	}
+
+	private void CreateSkybox()
+	{
+		int32 faceSize = 64;
+		int32 faceBytes = faceSize * faceSize * 4;
+
+		// Create cubemap texture (2D array with 6 layers)
+		var texDesc = TextureDescriptor.Texture2D((uint32)faceSize, (uint32)faceSize, .RGBA8Unorm, .Sampled | .CopyDst);
+		texDesc.ArrayLayerCount = 6;
+
+		if (Device.CreateTexture(&texDesc) case .Ok(let tex))
+			mSkyboxTexture = tex;
+		else
+			return;
+
+		// Generate gradient data and upload each face
+		let faceData = new uint8[faceBytes];
+		defer delete faceData;
+
+		for (int32 face = 0; face < 6; face++)
+		{
+			for (int32 y = 0; y < faceSize; y++)
+			{
+				float t = (float)y / (float)(faceSize - 1);
+				uint8 r, g, b;
+
+				if (face == 2) // +Y (top) — sky blue
+				{
+					r = (uint8)(60 + (1.0f - t) * 40);
+					g = (uint8)(120 + (1.0f - t) * 40);
+					b = (uint8)(200 + (1.0f - t) * 40);
+				}
+				else if (face == 3) // -Y (bottom) — dark ground
+				{
+					r = 40; g = 35; b = 30;
+				}
+				else // Side faces — gradient from blue (top) to light horizon (bottom)
+				{
+					r = (uint8)(100 + t * 80);
+					g = (uint8)(140 + t * 50);
+					b = (uint8)(210 - t * 20);
+				}
+
+				for (int32 x = 0; x < faceSize; x++)
+				{
+					let idx = (y * faceSize + x) * 4;
+					faceData[idx + 0] = r;
+					faceData[idx + 1] = g;
+					faceData[idx + 2] = b;
+					faceData[idx + 3] = 255;
+				}
+			}
+
+			// Upload this face to the appropriate array layer
+			var layout = TextureDataLayout() { Offset = 0, BytesPerRow = (uint32)(faceSize * 4), RowsPerImage = (uint32)faceSize };
+			var writeSize = Extent3D() { Width = (uint32)faceSize, Height = (uint32)faceSize, Depth = 1 };
+			Device.Queue.WriteTexture(mSkyboxTexture, Span<uint8>(&faceData[0], faceBytes), &layout, &writeSize, 0, (uint32)face);
+		}
+
+		// Create cubemap view
+		var viewDesc = TextureViewDescriptor() { Format = .RGBA8Unorm, Dimension = .TextureCube, ArrayLayerCount = 6 };
+		if (Device.CreateTextureView(mSkyboxTexture, &viewDesc) case .Ok(let view))
+			mSkyboxTextureView = view;
+		else
+			return;
+
+		// Create skybox node and component
+		let skyNode = mScene.CreateChild("Skybox");
+		let skybox = skyNode.CreateComponent<Skybox>();
+		skybox.CubemapView = mSkyboxTextureView;
+		skybox.CreateBuffers(Device);
+	}
+
+	private void CreateProceduralGeometry()
+	{
+		let node = mScene.CreateChild("Pyramid");
+		node.Position = .(12, 1, 0);
+
+		let proc = node.CreateComponent<ProceduralGeometry>();
+		proc.CastShadows = true;
+		proc.BeginGeometry();
+
+		// Build a pyramid: square base + 4 triangular faces
+		float s = 1.5f; // Half-size of base
+		float h = 3.0f; // Height
+
+		Vector3 bl = .(-s, 0, -s); // Base corners
+		Vector3 br = .(s, 0, -s);
+		Vector3 fr = .(s, 0, s);
+		Vector3 fl = .(-s, 0, s);
+		Vector3 top = .(0, h, 0);
+
+		uint32 gold = 0xFF00D4FF; // ABGR: golden yellow
+
+		// Base quad (two triangles, facing down)
+		proc.AddQuad(bl, br, fr, fl, gold);
+
+		// Front face
+		proc.AddTriangle(fl, fr, top, gold);
+		// Right face
+		proc.AddTriangle(fr, br, top, gold);
+		// Back face
+		proc.AddTriangle(br, bl, top, gold);
+		// Left face
+		proc.AddTriangle(bl, fl, top, gold);
+
+		proc.Commit();
+
+		// ProceduralVertex now matches the standard Mesh layout (48 bytes) — use normal PBR material
+		if (CreateMaterialInstance(.(0.9f, 0.7f, 0.2f, 1.0f), 0.3f, 0.4f) case .Ok(let inst))
+			proc.DefaultMaterial = inst;
+	}
+
+	private void CreateDecals()
+	{
+		let node = mScene.CreateChild("Decals");
+		let decalSet = node.CreateComponent<DecalSet>();
+
+		// Create a decal material — Decal vertex layout (36 bytes: Pos+Normal+UV+Color)
+		// Must declare all uniforms that decal.frag.hlsl expects in MaterialUniforms cbuffer
+		mDecalMaterial = scope MaterialBuilder("DecalMat")
+			.Shader("decal")
+			.VertexLayout(.Decal)
+			.Transparent()
+			.Cull(.None)
+			.Color("BaseColor", .(1, 1, 1, 1))
+			.Float("Metallic", 0.0f)
+			.Float("Roughness", 0.5f)
+			.Float("AO", 1.0f)
+			.Float("AlphaCutoff", 0.0f)
+			.Color("EmissiveColor", .(0, 0, 0, 0))
+			.Texture("AlbedoMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Sampler("MainSampler", mRenderer.MaterialSystem.DefaultSampler)
+			.Build();
+
+		let inst = new MaterialInstance(mDecalMaterial);
+		inst.SetColor("BaseColor", .(0.8f, 0.2f, 0.2f, 0.7f));
+		mMaterialInstances.Add(inst);
+		if (mRenderer.MaterialSystem.PrepareInstance(inst) case .Ok)
+			decalSet.Material = inst;
+
+		// Scatter a few decals on the ground
+		decalSet.AddDecal(.(0, 0.01f, 5), .(0, 1, 0), 2.0f);
+		decalSet.AddDecal(.(4, 0.01f, -3), .(0, 1, 0), 1.5f);
+		decalSet.AddDecal(.(-3, 0.01f, -6), .(0, 1, 0), 2.5f);
+		decalSet.AddDecal(.(6, 0.01f, 2), .(0, 1, 0), 1.8f);
+	}
+
+	private void CreateRibbonTrail()
+	{
+		// Create an orbiting node
+		mTrailNode = mScene.CreateChild("TrailOrbit");
+		mTrailNode.Position = .(6, 3, 0);
+
+		let trail = mTrailNode.CreateComponent<RibbonTrail>();
+		trail.Width = 0.5f;
+		trail.EndWidth = 0.0f;
+		trail.Lifetime = 1.5f;
+		trail.MinVertexDistance = 0.3f;
+		trail.MaxPoints = 50;
+		trail.StartColor = BillboardSet.PackColor(0.2f, 0.8f, 1.0f, 1.0f);
+		trail.EndColor = BillboardSet.PackColor(0.1f, 0.3f, 1.0f, 0.0f);
+		trail.Emitting = true;
+
+		// Create additive trail material using billboard shader
+		mTrailMaterial = scope MaterialBuilder("TrailMat")
+			.Shader("billboard")
+			.VertexLayout(.PositionUVColor)
+			.Additive()
+			.Cull(.None)
+			.Texture("AlbedoMap", mRenderer.MaterialSystem.WhiteTexture)
+			.Sampler("MainSampler", mRenderer.MaterialSystem.DefaultSampler)
+			.Build();
+
+		let inst = new MaterialInstance(mTrailMaterial);
+		mMaterialInstances.Add(inst);
+		if (mRenderer.MaterialSystem.PrepareInstance(inst) case .Ok)
+			trail.Material = inst;
+	}
+
+	private void UpdateTrailOrbit(float timeStep)
+	{
+		if (mTrailNode == null) return;
+		mTrailAngle += timeStep * 2.0f; // ~2 rad/sec
+		float radius = 6.0f;
+		mTrailNode.Position = .(
+			Math.Cos(mTrailAngle) * radius,
+			3.0f + Math.Sin(mTrailAngle * 0.7f) * 1.0f, // Gentle vertical bob
+			Math.Sin(mTrailAngle) * radius
+		);
+	}
+
+	private void SetupPostProcessing()
+	{
+		mPostProcessStack = new PostProcessStack();
+		mToneMapEffect = new ToneMapEffect();
+		mToneMapEffect.Method = .ACES;
+		mToneMapEffect.Exposure = 1.0f;
+		mToneMapEffect.Gamma = 2.2f;
+		// NOTE: ToneMapEffect may need InitializeGPU() with a pipeline — verify when enabling
+		mPostProcessStack.AddEffect(mToneMapEffect);
+		mViewport.PostProcessStack = mPostProcessStack;
+	}
+
+	private void SetupNavigation()
+	{
+		// Build navmesh from the ground plane (50x50 flat quad at Y=0)
+		let navNode = mScene.CreateChild("Navigation");
+		mNavMesh = navNode.CreateComponent<NavigationMesh>();
+		mNavMesh.CellSize = 0.3f;
+		mNavMesh.CellHeight = 0.2f;
+		mNavMesh.AgentHeight = 1.8f;
+		mNavMesh.AgentRadius = 0.5f;
+
+		// Ground plane triangle soup: two triangles covering -25..25 on XZ at Y=0
+		float halfSize = 25.0f;
+		float[12] verts = .(
+			-halfSize, 0, -halfSize,
+			 halfSize, 0, -halfSize,
+			 halfSize, 0,  halfSize,
+			-halfSize, 0,  halfSize
+		);
+		int32[6] indices = .(0, 2, 1, 0, 3, 2);
+		let bounds = BoundingBox(.(-halfSize, -0.5f, -halfSize), .(halfSize, 0.5f, halfSize));
+
+		if (mNavMesh.Build(Span<float>(&verts[0], 12), Span<int32>(&indices[0], 6), bounds) case .Err)
+		{
+			Console.WriteLine("[Nav] Failed to build navigation mesh");
+			return;
+		}
+		Console.WriteLine("[Nav] Navigation mesh built successfully");
+
+		// Initialize crowd manager
+		mCrowdManager = navNode.CreateComponent<CrowdManager>();
+		mCrowdManager.MaxAgents = 32;
+		if (mCrowdManager.Initialize(mNavMesh) case .Err)
+		{
+			Console.WriteLine("[Nav] Failed to initialize crowd manager");
+			return;
+		}
+		Console.WriteLine("[Nav] Crowd manager initialized");
+
+		// Create agent nodes — small colored boxes that navigate the ground
+		Color[4] agentColors = .(
+			Color(1.0f, 0.3f, 0.3f, 1.0f),
+			Color(0.3f, 1.0f, 0.3f, 1.0f),
+			Color(0.3f, 0.3f, 1.0f, 1.0f),
+			Color(1.0f, 1.0f, 0.3f, 1.0f)
+		);
+		Vector3[4] startPositions = .(
+			.(-8, 0.5f, -8),
+			.( 8, 0.5f, -8),
+			.( 8, 0.5f,  8),
+			.(-8, 0.5f,  8)
+		);
+
+		for (int i = 0; i < 4; i++)
+		{
+			let agentNode = mScene.CreateChild("NavAgent");
+			agentNode.Position = startPositions[i];
+			agentNode.Scale = .(0.6f, 1.0f, 0.6f);
+
+			// Visual: small box
+			let model = agentNode.CreateComponent<StaticModel>();
+			let mesh = StaticMesh.CreateCube(1.0f);
+			mMeshes.Add(mesh);
+			model.Mesh = mesh;
+			let col = agentColors[i];
+			if (CreateMaterialInstance(.((float)col.R / 255.0f, (float)col.G / 255.0f, (float)col.B / 255.0f, 1.0f), 0.0f, 0.5f) case .Ok(let inst))
+				model.SetMaterial(inst);
+
+			// Navigation agent
+			let agent = agentNode.CreateComponent<CrowdAgent>();
+			agent.Radius = 0.5f;
+			agent.Height = 1.0f;
+			agent.MaxSpeed = 3.5f;
+			agent.MaxAcceleration = 8.0f;
+			if (agent.Register(mCrowdManager) case .Ok)
+			{
+				mCrowdAgents.Add(agent);
+				mAgentNodes.Add(agentNode);
+			}
+		}
+
+		Console.WriteLine(scope $"[Nav] {mCrowdAgents.Count} agents registered");
+	}
+
+	private void UpdateNavigation(float timeStep)
+	{
+		if (mCrowdManager == null || !mCrowdManager.IsInitialized)
+			return;
+
+		// Periodically assign random targets
+		mNavTargetTimer -= timeStep;
+		if (mNavTargetTimer <= 0)
+		{
+			mNavTargetTimer = 4.0f; // New targets every 4 seconds
+			for (int ai = 0; ai < mCrowdAgents.Count; ai++)
+			{
+				let agent = mCrowdAgents[ai];
+				if (mNavMesh.GetRandomPoint() case .Ok(let target))
+				{
+					agent.SetTargetPosition(target);
+
+					// Store first agent's path for debug drawing
+					if (ai == 0)
+					{
+						mDebugPath.Clear();
+						mNavMesh.FindPath(agent.CrowdPosition, target, mDebugPath);
+					}
+				}
+			}
+		}
+
+		// Step crowd simulation
+		mCrowdManager.Update(timeStep);
+
+		// Sync node positions from crowd
+		for (let agent in mCrowdAgents)
+		{
+			agent.SyncFromCrowd();
+			// Keep agents at visual height (crowd operates on navmesh Y=0)
+			if (agent.Node != null)
+			{
+				var pos = agent.Node.Position;
+				pos.Y = 0.5f;
+				agent.Node.Position = pos;
+			}
+		}
+	}
+
 	private void OnUpdate(float timeStep)
 	{
 		using (SProfiler.Begin("App.OnUpdate"))
 		{
 		// Process models that finished loading on background threads
 		ProcessPendingModels();
+
+		// --- Update Ribbon Trail orbit ---
+		UpdateTrailOrbit(timeStep);
+
+		// --- Update Navigation ---
+		UpdateNavigation(timeStep);
 
 		// Step physics and sync dynamic body transforms
 		using (SProfiler.Begin("Physics"))
@@ -842,7 +1334,7 @@ class DemoApp : SedulousApp
 
 		mCameraNode.Position = pos;
 
-		// DEBUG: Draw bounding boxes for particles and sprite
+		// DEBUG: Draw bounding boxes for particles and sprite, and light gizmos
 		if (mDebugRenderer != null)
 		{
 			mDebugRenderer.BeginFrame();
@@ -862,6 +1354,95 @@ class DemoApp : SedulousApp
 						if (d.Node != null)
 							mDebugRenderer.AddCross(d.Node.WorldPosition, 0.5f, Color.Cyan, depthTest: false);
 					}
+				}
+
+				// Draw light gizmos
+				let lights = scope List<Drawable>();
+				octree.QueryBox(BoundingBox(Vector3(-500), Vector3(500)), lights, .Light);
+				for (let d in lights)
+				{
+					if (let light = d as Light)
+					{
+						let lightPos = light.WorldPosition;
+
+						switch (light.LightType)
+						{
+						case .Point:
+							// Sphere showing range
+							mDebugRenderer.AddSphere(lightPos, light.Range, Color(0.4f, 0.6f, 1.0f), depthTest: false, segments: 16);
+							mDebugRenderer.AddCross(lightPos, 0.5f, Color(0.4f, 0.6f, 1.0f), depthTest: false);
+
+						case .Spot:
+							// Cone: apex at light position, opening along light direction
+							let dir = light.Direction;
+							let range = light.Range;
+							let halfFov = light.SpotFov * 0.5f;
+							let endRadius = Math.Tan(halfFov) * range;
+							let endCenter = lightPos + dir * range;
+
+							// Build a local coordinate frame perpendicular to the light direction
+							var up = Vector3.Up;
+							if (Math.Abs(Vector3.Dot(dir, up)) > 0.99f)
+								up = Vector3.Right;
+							let right = Vector3.Normalize(Vector3.Cross(dir, up));
+							let orthoUp = Vector3.Cross(right, dir);
+
+							// Draw cone outline: 8 lines from apex to base circle
+							let coneColor = Color(1.0f, 0.9f, 0.3f);
+							int coneSegments = 16;
+							for (int i = 0; i < coneSegments; i++)
+							{
+								float a0 = Math.PI_f * 2.0f * (float)i / (float)coneSegments;
+								float a1 = Math.PI_f * 2.0f * (float)(i + 1) / (float)coneSegments;
+								let p0 = endCenter + (right * Math.Cos(a0) + orthoUp * Math.Sin(a0)) * endRadius;
+								let p1 = endCenter + (right * Math.Cos(a1) + orthoUp * Math.Sin(a1)) * endRadius;
+								// Base circle segment
+								mDebugRenderer.AddLine(p0, p1, coneColor, depthTest: false);
+								// Rays from apex (every 4th segment)
+								if (i % 4 == 0)
+									mDebugRenderer.AddLine(lightPos, p0, coneColor, depthTest: false);
+							}
+							mDebugRenderer.AddCross(lightPos, 0.5f, coneColor, depthTest: false);
+
+						case .Directional:
+							// Just a cross + direction arrow
+							let camPos = mCameraNode.Position;
+							let arrowStart = camPos + .(0, 5, 0);
+							mDebugRenderer.AddLine(arrowStart, arrowStart + light.Direction * 5.0f, Color(1.0f, 1.0f, 0.5f), depthTest: false);
+							mDebugRenderer.AddCross(arrowStart, 0.3f, Color(1.0f, 1.0f, 0.5f), depthTest: false);
+						}
+					}
+				}
+
+				// Draw navigation debug: path lines + agent velocity vectors
+				if (mDebugPath.Count > 1)
+				{
+					let pathColor = Color(0.0f, 1.0f, 0.0f);
+					for (int i = 0; i < mDebugPath.Count - 1; i++)
+					{
+						var p0 = mDebugPath[i]; p0.Y += 0.1f;
+						var p1 = mDebugPath[i + 1]; p1.Y += 0.1f;
+						mDebugRenderer.AddLine(p0, p1, pathColor, depthTest: false);
+					}
+					// Waypoint markers
+					for (let wp in mDebugPath)
+					{
+						var wpVis = wp; wpVis.Y += 0.1f;
+						mDebugRenderer.AddCross(wpVis, 0.2f, pathColor, depthTest: false);
+					}
+				}
+
+				// Agent velocity arrows + position markers
+				for (let agent in mCrowdAgents)
+				{
+					let agentPos = agent.CrowdPosition;
+					let vel = agent.Velocity;
+					var drawPos = agentPos; drawPos.Y = 0.5f;
+					// Velocity arrow (cyan)
+					if (vel.LengthSquared() > 0.01f)
+						mDebugRenderer.AddLine(drawPos, drawPos + vel * 0.5f, Color(0.0f, 1.0f, 1.0f), depthTest: false);
+					// Agent position cross (white)
+					mDebugRenderer.AddCross(drawPos, agent.Radius, Color.White, depthTest: false);
 				}
 			}
 		}
@@ -994,10 +1575,23 @@ class DemoApp : SedulousApp
 			mRenderer = null;
 		}
 
+		// Clear post-process stack reference before deleting viewport
+		if (mViewport != null && mPostProcessStack != null)
+			mViewport.PostProcessStack = null;
+
 		if (mViewport != null)
 		{
 			delete mViewport;
 			mViewport = null;
+		}
+
+		// Post-processing cleanup
+		// PostProcessStack owns its effects (DeleteContainerAndItems), so don't delete mToneMapEffect separately
+		if (mPostProcessStack != null)
+		{
+			delete mPostProcessStack;
+			mPostProcessStack = null;
+			mToneMapEffect = null; // Owned and deleted by the stack
 		}
 
 		// mMaterialInstances, mMeshes cleaned up by field destructors
@@ -1012,6 +1606,16 @@ class DemoApp : SedulousApp
 			delete mSpriteMaterial;
 			mSpriteMaterial = null;
 		}
+		if (mTrailMaterial != null)
+		{
+			delete mTrailMaterial;
+			mTrailMaterial = null;
+		}
+		if (mDecalMaterial != null)
+		{
+			delete mDecalMaterial;
+			mDecalMaterial = null;
+		}
 		if (mSpriteTextureView != null)
 		{
 			delete mSpriteTextureView;
@@ -1021,6 +1625,16 @@ class DemoApp : SedulousApp
 		{
 			delete mSpriteTexture;
 			mSpriteTexture = null;
+		}
+		if (mSkyboxTextureView != null)
+		{
+			delete mSkyboxTextureView;
+			mSkyboxTextureView = null;
+		}
+		if (mSkyboxTexture != null)
+		{
+			delete mSkyboxTexture;
+			mSkyboxTexture = null;
 		}
 		if (mPbrMaterial != null)
 		{

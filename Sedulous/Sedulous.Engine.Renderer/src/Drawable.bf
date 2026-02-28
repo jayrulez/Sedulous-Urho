@@ -79,6 +79,10 @@ public class Drawable : Component
 			mBoundingBox = value;
 			mWorldBoundingBoxDirty = true;
 			mOctreeDirty = true;
+
+			// Request octree reinsertion so spatial queries use updated bounds
+			if (mOctree != null)
+				mOctree.QueueUpdate(this);
 		}
 	}
 

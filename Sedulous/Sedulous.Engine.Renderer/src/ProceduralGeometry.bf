@@ -8,12 +8,15 @@ using Sedulous.Materials;
 namespace Sedulous.Engine.Renderer;
 
 /// Vertex format for procedural geometry.
+/// Matches the standard Mesh vertex layout (48 bytes):
+/// Position(float3) + Normal(float3) + UV(float2) + Color(ubyte4) + Tangent(float3)
 public struct ProceduralVertex
 {
 	public Vector3 Position;
 	public Vector3 Normal;
 	public Vector2 UV;
 	public uint32 Color;
+	public Vector3 Tangent;
 
 	public this()
 	{
@@ -21,14 +24,16 @@ public struct ProceduralVertex
 		Normal = .(0, 1, 0);
 		UV = .Zero;
 		Color = 0xFFFFFFFF;
+		Tangent = .(1, 0, 0);
 	}
 
-	public this(Vector3 pos, Vector3 normal, Vector2 uv, uint32 color = 0xFFFFFFFF)
+	public this(Vector3 pos, Vector3 normal, Vector2 uv, uint32 color = 0xFFFFFFFF, Vector3 tangent = .(1, 0, 0))
 	{
 		Position = pos;
 		Normal = normal;
 		UV = uv;
 		Color = color;
+		Tangent = tangent;
 	}
 }
 
@@ -46,7 +51,7 @@ struct ProceduralSubGeometry
 /// to generate SourceBatch entries. Supports multiple sub-geometries
 /// with separate materials.
 ///
-/// Vertex format: Position(Vec3) + Normal(Vec3) + UV(Vec2) + Color(uint32) = 36 bytes
+/// Vertex format: Position(Vec3) + Normal(Vec3) + UV(Vec2) + Color(uint32) + Tangent(Vec3) = 48 bytes
 ///
 [EngineComponent("Rendering")]
 public class ProceduralGeometry : Drawable
@@ -64,8 +69,8 @@ public class ProceduralGeometry : Drawable
 	private bool mDirty = true;
 	private MaterialInstance mDefaultMaterial;
 
-	// Vertex: Position(Vec3=12) + Normal(Vec3=12) + UV(Vec2=8) + Color(uint32=4) = 36 bytes
-	private const int32 VERTEX_SIZE = 36;
+	// Vertex: Position(Vec3=12) + Normal(Vec3=12) + UV(Vec2=8) + Color(uint32=4) + Tangent(Vec3=12) = 48 bytes
+	private const int32 VERTEX_SIZE = 48;
 
 	public this()
 	{
@@ -110,10 +115,10 @@ public class ProceduralGeometry : Drawable
 		return idx;
 	}
 
-	/// Adds a vertex with position, normal, UV, and color. Returns its index.
-	public uint32 AddVertex(Vector3 position, Vector3 normal, Vector2 uv, uint32 color = 0xFFFFFFFF)
+	/// Adds a vertex with position, normal, UV, color, and tangent. Returns its index.
+	public uint32 AddVertex(Vector3 position, Vector3 normal, Vector2 uv, uint32 color = 0xFFFFFFFF, Vector3 tangent = .(1, 0, 0))
 	{
-		return AddVertex(ProceduralVertex(position, normal, uv, color));
+		return AddVertex(ProceduralVertex(position, normal, uv, color, tangent));
 	}
 
 	/// Adds a triangle by vertex indices.
@@ -161,30 +166,32 @@ public class ProceduralGeometry : Drawable
 
 	// ===== Convenience Shapes =====
 
-	/// Adds a triangle with computed flat normal.
+	/// Adds a triangle with computed flat normal and tangent.
 	public void AddTriangle(Vector3 p0, Vector3 p1, Vector3 p2, uint32 color = 0xFFFFFFFF)
 	{
 		let edge1 = p1 - p0;
 		let edge2 = p2 - p0;
 		let normal = Vector3.Normalize(Vector3.Cross(edge1, edge2));
+		let tangent = Vector3.Normalize(edge1); // UV u-axis aligns with p0→p1
 
-		let i0 = AddVertex(p0, normal, .(0, 0), color);
-		let i1 = AddVertex(p1, normal, .(1, 0), color);
-		let i2 = AddVertex(p2, normal, .(0, 1), color);
+		let i0 = AddVertex(p0, normal, .(0, 0), color, tangent);
+		let i1 = AddVertex(p1, normal, .(1, 0), color, tangent);
+		let i2 = AddVertex(p2, normal, .(0, 1), color, tangent);
 		AddTriangle(i0, i1, i2);
 	}
 
-	/// Adds a quad from 4 corner positions with computed normal.
+	/// Adds a quad from 4 corner positions with computed normal and tangent.
 	public void AddQuad(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, uint32 color = 0xFFFFFFFF)
 	{
 		let edge1 = p1 - p0;
 		let edge2 = p3 - p0;
 		let normal = Vector3.Normalize(Vector3.Cross(edge1, edge2));
+		let tangent = Vector3.Normalize(edge1); // UV u-axis aligns with p0→p1
 
-		let i0 = AddVertex(p0, normal, .(0, 1), color);
-		let i1 = AddVertex(p1, normal, .(1, 1), color);
-		let i2 = AddVertex(p2, normal, .(1, 0), color);
-		let i3 = AddVertex(p3, normal, .(0, 0), color);
+		let i0 = AddVertex(p0, normal, .(0, 1), color, tangent);
+		let i1 = AddVertex(p1, normal, .(1, 1), color, tangent);
+		let i2 = AddVertex(p2, normal, .(1, 0), color, tangent);
+		let i3 = AddVertex(p3, normal, .(0, 0), color, tangent);
 		AddQuad(i0, i1, i2, i3);
 	}
 

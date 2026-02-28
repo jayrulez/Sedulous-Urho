@@ -3,6 +3,7 @@ using Sedulous.Foundation.Mathematics;
 using Sedulous.Engine.Core;
 
 namespace Sedulous.Engine.Navigation;
+using internal Sedulous.Engine.Navigation;
 
 /// Scene component representing a crowd-managed navigation agent.
 ///
@@ -25,7 +26,9 @@ public class CrowdAgent : Component
 
 	public ~this()
 	{
-		RemoveFromCrowd();
+		// Don't call RemoveFromCrowd() here — OnRemoved() already handles it,
+		// and during scene teardown the CrowdManager may already be deleted.
+		// CrowdManager.Cleanup() clears our reference via ClearCrowdReference().
 	}
 
 	// ===== Properties =====
@@ -107,6 +110,8 @@ public class CrowdAgent : Component
 		if (mAgentIndex < 0)
 			return .Err;
 
+		crowdManager.TrackAgent(this);
+
 		// Apply any pending target
 		if (mHasTarget)
 			crowdManager.RequestMoveTarget(mAgentIndex, mTargetPosition);
@@ -120,7 +125,15 @@ public class CrowdAgent : Component
 		if (mCrowdManager != null && mAgentIndex >= 0)
 		{
 			mCrowdManager.RemoveAgent(mAgentIndex);
+			mCrowdManager.UntrackAgent(this);
 		}
+		mAgentIndex = -1;
+		mCrowdManager = null;
+	}
+
+	/// Called by CrowdManager during its cleanup to prevent dangling references.
+	internal void ClearCrowdReference()
+	{
 		mAgentIndex = -1;
 		mCrowdManager = null;
 	}

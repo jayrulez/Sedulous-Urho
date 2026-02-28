@@ -77,14 +77,15 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
 // Lighting
 // ============================================================
 
-// Compute attenuation for point/spot lights
+// Compute attenuation for point/spot lights.
+// Smooth windowing function that reaches zero at range (no inverse-square divisor).
 float ComputeAttenuation(float distance, float range)
 {
     if (range <= 0) return 1.0; // Directional
     float d = distance / range;
     float d2 = d * d;
     float atten = saturate(1.0 - d2 * d2);
-    return atten * atten / (distance * distance + 0.01);
+    return atten * atten;
 }
 
 // Compute spot light cone factor

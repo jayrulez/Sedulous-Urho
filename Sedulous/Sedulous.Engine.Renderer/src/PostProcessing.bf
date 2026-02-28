@@ -23,16 +23,16 @@ public abstract class PostProcessEffect
 	/// inputColor: handle to the current scene color texture.
 	/// Returns: handle to the output color texture (may be same or different).
 	public abstract ResourceHandle Apply(RenderGraph graph, ResourceHandle inputColor,
-		uint32 width, uint32 height);
+		uint32 width, uint32 height, int32 frameIndex);
 
 	/// Adds this effect's passes with an explicit output target.
 	/// Override this when the effect can write directly to a specified target
 	/// (e.g., the backbuffer) instead of creating its own output.
 	/// Default implementation ignores outputTarget and calls the regular Apply.
 	public virtual ResourceHandle ApplyTo(RenderGraph graph, ResourceHandle inputColor,
-		ResourceHandle outputTarget, uint32 width, uint32 height)
+		ResourceHandle outputTarget, uint32 width, uint32 height, int32 frameIndex)
 	{
-		return Apply(graph, inputColor, width, height);
+		return Apply(graph, inputColor, width, height, frameIndex);
 	}
 }
 
@@ -67,6 +67,8 @@ public struct ToneMapUniformData
 ///
 public class ToneMapEffect : PostProcessEffect
 {
+	private const int32 MAX_FRAMES = FrameConfig.MAX_FRAMES_IN_FLIGHT;
+
 	/// Tone mapping method.
 	public ToneMapMethod Method = .ACES;
 	/// Exposure multiplier.
@@ -78,9 +80,9 @@ public class ToneMapEffect : PostProcessEffect
 	private IDevice mDevice;
 	private IRenderPipeline mPipeline;
 	private IBindGroupLayout mBindGroupLayout ~ { if (_ != null) delete _; };
-	private IBuffer mUniformBuffer ~ { if (_ != null) delete _; };
+	private IBuffer[MAX_FRAMES] mUniformBuffers ~ { for (let b in _) if (b != null) delete b; };
 	private ISampler mLinearSampler ~ { if (_ != null) delete _; };
-	private IBindGroup mCachedBindGroup ~ { if (_ != null) delete _; };
+	private IBindGroup[MAX_FRAMES] mCachedBindGroups ~ { for (let bg in _) if (bg != null) delete bg; };
 
 	public override StringView Name => "ToneMapping";
 
@@ -94,12 +96,15 @@ public class ToneMapEffect : PostProcessEffect
 		mDevice = device;
 		mPipeline = pipeline;
 
-		// Create uniform buffer (16 bytes)
-		var bufDesc = BufferDescriptor((uint64)sizeof(ToneMapUniformData), .Uniform | .CopyDst);
-		if (device.CreateBuffer(&bufDesc) case .Ok(let buf))
-			mUniformBuffer = buf;
-		else
-			return .Err;
+		// Create uniform buffers (one per frame in flight)
+		for (int32 i = 0; i < MAX_FRAMES; i++)
+		{
+			var bufDesc = BufferDescriptor((uint64)sizeof(ToneMapUniformData), .Uniform | .CopyDst, .Upload);
+			if (device.CreateBuffer(&bufDesc) case .Ok(let buf))
+				mUniformBuffers[i] = buf;
+			else
+				return .Err;
+		}
 
 		// Create linear sampler
 		var samplerDesc = SamplerDescriptor();
@@ -133,24 +138,25 @@ public class ToneMapEffect : PostProcessEffect
 	public IBindGroupLayout BindGroupLayout => mBindGroupLayout;
 
 	public override ResourceHandle Apply(RenderGraph graph, ResourceHandle inputColor,
-		uint32 width, uint32 height)
+		uint32 width, uint32 height, int32 frameIndex)
 	{
-		return ApplyTo(graph, inputColor, inputColor, width, height);
+		return ApplyTo(graph, inputColor, inputColor, width, height, frameIndex);
 	}
 
 	public override ResourceHandle ApplyTo(RenderGraph graph, ResourceHandle inputColor,
-		ResourceHandle outputTarget, uint32 width, uint32 height)
+		ResourceHandle outputTarget, uint32 width, uint32 height, int32 frameIndex)
 	{
-		if (mPipeline == null || mDevice == null || mUniformBuffer == null)
+		let fi = frameIndex % MAX_FRAMES;
+		if (mPipeline == null || mDevice == null || mUniformBuffers[fi] == null)
 			return inputColor;
 
-		// Upload uniform data
+		// Upload uniform data to this frame's buffer
 		var data = ToneMapUniformData();
 		data.Exposure = Exposure;
 		data.Gamma = Gamma;
 		data.Method = (float)Method;
 		data.Pad = 0;
-		mDevice.Queue.WriteBuffer(mUniformBuffer, 0,
+		mDevice.Queue.WriteBuffer(mUniformBuffers[fi], 0,
 			Span<uint8>((uint8*)&data, sizeof(ToneMapUniformData)));
 
 		// Add the tonemap render pass
@@ -170,23 +176,24 @@ public class ToneMapEffect : PostProcessEffect
 				if (sceneView == null || mLinearSampler == null)
 					return;
 
-				// Release previous frame's bind group (safe: GPU finished with it by now)
-				if (mCachedBindGroup != null)
+				// Free this frame slot's previous bind group (GPU finished with it —
+				// we waited on its fence in AcquireNextImage before reaching here)
+				if (mCachedBindGroups[fi] != null)
 				{
-					delete mCachedBindGroup;
-					mCachedBindGroup = null;
+					delete mCachedBindGroups[fi];
+					mCachedBindGroups[fi] = null;
 				}
 
 				// Create bind group with the resolved texture view
 				BindGroupEntry[3] entries = .(
-					.Buffer(0, mUniformBuffer, 0, (uint64)sizeof(ToneMapUniformData)),
+					.Buffer(0, mUniformBuffers[fi], 0, (uint64)sizeof(ToneMapUniformData)),
 					.Texture(0, sceneView, .ShaderReadOnly),
 					.Sampler(0, mLinearSampler)
 				);
 				var bgDesc = BindGroupDescriptor(mBindGroupLayout, entries);
 				if (mDevice.CreateBindGroup(&bgDesc) case .Ok(let bindGroup))
 				{
-					mCachedBindGroup = bindGroup;
+					mCachedBindGroups[fi] = bindGroup;
 					encoder.SetPipeline(mPipeline);
 					encoder.SetBindGroup(0, bindGroup);
 					encoder.Draw(3, 1, 0, 0); // Fullscreen triangle
@@ -223,7 +230,7 @@ public class BloomEffect : PostProcessEffect
 	public override StringView Name => "Bloom";
 
 	public override ResourceHandle Apply(RenderGraph graph, ResourceHandle inputColor,
-		uint32 width, uint32 height)
+		uint32 width, uint32 height, int32 frameIndex)
 	{
 		if (BrightPassPipeline == null || BlurPipeline == null || CompositePipeline == null)
 			return inputColor;
@@ -294,14 +301,14 @@ public class PostProcessStack
 	/// Applies all enabled effects to the render graph.
 	/// Returns the final output handle.
 	public ResourceHandle Apply(RenderGraph graph, ResourceHandle inputColor,
-		uint32 width, uint32 height)
+		uint32 width, uint32 height, int32 frameIndex)
 	{
 		var current = inputColor;
 
 		for (let effect in mEffects)
 		{
 			if (effect.Enabled)
-				current = effect.Apply(graph, current, width, height);
+				current = effect.Apply(graph, current, width, height, frameIndex);
 		}
 
 		return current;
@@ -311,7 +318,7 @@ public class PostProcessStack
 	/// inputColor: HDR scene texture.
 	/// finalOutput: display target (e.g., backbuffer).
 	public ResourceHandle Apply(RenderGraph graph, ResourceHandle inputColor,
-		ResourceHandle finalOutput, uint32 width, uint32 height)
+		ResourceHandle finalOutput, uint32 width, uint32 height, int32 frameIndex)
 	{
 		var current = inputColor;
 
@@ -332,9 +339,9 @@ public class PostProcessStack
 				continue;
 
 			if (i == lastEnabledIdx)
-				current = effect.ApplyTo(graph, current, finalOutput, width, height);
+				current = effect.ApplyTo(graph, current, finalOutput, width, height, frameIndex);
 			else
-				current = effect.Apply(graph, current, width, height);
+				current = effect.Apply(graph, current, width, height, frameIndex);
 		}
 
 		return current;

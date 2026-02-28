@@ -62,7 +62,7 @@ float ComputeAttenuation(float distance, float range)
     float d = distance / range;
     float d2 = d * d;
     float atten = saturate(1.0 - d2 * d2);
-    return atten * atten / (distance * distance + 0.01);
+    return atten * atten;
 }
 
 float ComputeSpotFactor(float3 lightDir, float3 spotDirection, float cosOuter, float cosInner)

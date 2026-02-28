@@ -5,6 +5,7 @@ using Sedulous.Engine.Core;
 using recastnavigation_Beef;
 
 namespace Sedulous.Engine.Navigation;
+using internal Sedulous.Engine.Navigation;
 
 /// Scene component that manages crowd-based pathfinding and local avoidance.
 ///
@@ -18,6 +19,7 @@ public class CrowdManager : Component
 	private int32 mMaxAgents = 128;
 	private float mMaxAgentRadius = 2.0f;
 	private NavigationMesh mNavMesh;
+	private List<CrowdAgent> mRegisteredAgents = new .() ~ delete _;
 
 	public ~this()
 	{
@@ -198,8 +200,27 @@ public class CrowdManager : Component
 
 	// ===== Private =====
 
+	/// Registers an agent for tracking (so we can clear references on shutdown).
+	internal void TrackAgent(CrowdAgent agent)
+	{
+		if (!mRegisteredAgents.Contains(agent))
+			mRegisteredAgents.Add(agent);
+	}
+
+	/// Unregisters an agent from tracking.
+	internal void UntrackAgent(CrowdAgent agent)
+	{
+		mRegisteredAgents.Remove(agent);
+	}
+
 	private void Cleanup()
 	{
+		// Clear all agent references to this manager before freeing the crowd,
+		// so agents don't try to call into freed Detour handles during teardown.
+		for (let agent in mRegisteredAgents)
+			agent.ClearCrowdReference();
+		mRegisteredAgents.Clear();
+
 		if (mNavQuery != null)
 		{
 			dtFreeNavMeshQuery(mNavQuery);

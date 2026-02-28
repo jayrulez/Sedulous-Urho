@@ -113,7 +113,10 @@ public class Renderer
 	private ICommandBuffer[MAX_FRAMES_IN_FLIGHT] mCommandBuffers;
 
 	// Current render target format (set per-viewport, used when creating pipelines)
+	// When post-processing is active, mCurrentColorFormat is the HDR intermediate format
+	// and mSwapChainFormat is preserved for the final output pass (tonemap).
 	private TextureFormat mCurrentColorFormat = .BGRA8UnormSrgb;
+	private TextureFormat mSwapChainFormat = .BGRA8UnormSrgb;
 
 	// Frame tracking
 	private int32 mCurrentFrameIndex = 0;
@@ -588,7 +591,12 @@ public class Renderer
 
 		// Set current color format from swap chain (used when creating pipelines)
 		if (swapChain != null)
-			mCurrentColorFormat = swapChain.Format;
+			mSwapChainFormat = swapChain.Format;
+
+		// When post-processing is active, scene renders to HDR intermediate texture;
+		// pipelines must use that format. Otherwise render directly to swapchain.
+		let hasPostProcess = viewport.PostProcessStack != null && viewport.PostProcessStack.Count > 0;
+		mCurrentColorFormat = hasPostProcess ? .RGBA16Float : mSwapChainFormat;
 
 		let camera = viewport.Camera;
 		let cameraPos = camera.Node != null ? camera.Node.WorldPosition : Vector3.Zero;
@@ -724,9 +732,10 @@ public class Renderer
 				return cfg;
 			}
 
-			// Pre-resolve shadow pipelines for Mesh (48 bytes) and MeshNoTangent (32 bytes) strides
+			// Pre-resolve shadow pipelines for each vertex layout stride
 			IRenderPipeline shadowPipelineMesh = null;
 			IRenderPipeline shadowPipelineNoTangent = null;
+			IRenderPipeline shadowPipelineDecal = null;
 			IRenderPipeline shadowPipelineSkinned = null;
 			if (mPipelineCache.GetOrCreate(MakeShadowConfig(.Mesh), mEmptyBindGroupLayout,
 				mShadowFrameBindGroupLayout, mObjectBindGroupLayout) case .Ok(let meshPl))
@@ -734,6 +743,9 @@ public class Renderer
 			if (mPipelineCache.GetOrCreate(MakeShadowConfig(.MeshNoTangent), mEmptyBindGroupLayout,
 				mShadowFrameBindGroupLayout, mObjectBindGroupLayout) case .Ok(let noTangentPl))
 				shadowPipelineNoTangent = noTangentPl;
+			if (mPipelineCache.GetOrCreate(MakeShadowConfig(.Decal), mEmptyBindGroupLayout,
+				mShadowFrameBindGroupLayout, mObjectBindGroupLayout) case .Ok(let decalPl))
+				shadowPipelineDecal = decalPl;
 
 			// Skinned shadow pipeline: SkinnedMesh layout + Skinned shader flag + bone bind group at slot 3
 			var skinnedShadowCfg = MakeShadowConfig(.SkinnedMesh);
@@ -792,6 +804,8 @@ public class Renderer
 								let batchLayout = batch.Material.Material.PipelineConfig.VertexLayout;
 								if (batchLayout == .MeshNoTangent)
 									shadowPl = shadowPipelineNoTangent;
+								else if (batchLayout == .Decal)
+									shadowPl = shadowPipelineDecal;
 							}
 
 							// Only switch pipeline when the layout changes (minimize state changes)
@@ -914,7 +928,7 @@ public class Renderer
 		if (hasPostProcess)
 		{
 			EnsurePostProcessResources(viewport.PostProcessStack);
-			viewport.PostProcessStack.Apply(mRenderGraph, sceneColor, colorTarget, (uint32)vpWidth, (uint32)vpHeight);
+			viewport.PostProcessStack.Apply(mRenderGraph, sceneColor, colorTarget, (uint32)vpWidth, (uint32)vpHeight, mCurrentFrameIndex);
 		}
 
 		// Compile and execute
@@ -1545,6 +1559,7 @@ public class Renderer
 
 		// Pack lights (up to MAX_SHADER_LIGHTS)
 		let lightCount = Math.Min(mLightList.Count, RenderConstants.MAX_SHADER_LIGHTS);
+
 		for (int32 i = 0; i < lightCount; i++)
 		{
 			let light = mLightList[i];
@@ -1555,9 +1570,10 @@ public class Renderer
 			data.Lights[i].PositionAndRange = .(pos.X, pos.Y, pos.Z, light.Range);
 			data.Lights[i].DirectionAndSpotAngle = .(dir.X, dir.Y, dir.Z,
 				Math.Cos(light.SpotFov * 0.5f));
-			data.Lights[i].ColorAndIntensity = .((float)col.R / 255.0f, (float)col.G / 255.0f, (float)col.B / 255.0f, light.SpecularIntensity);
+			data.Lights[i].ColorAndIntensity = .(col.X, col.Y, col.Z, light.SpecularIntensity);
 			data.Lights[i].TypeAndParams = .((float)light.LightType,
 				Math.Cos(light.SpotInnerFov * 0.5f), 0, 0);
+
 		}
 
 		// Pack shadow cascade data
@@ -1745,9 +1761,11 @@ public class Renderer
 				}
 
 				// Step 2: Create the tonemap pipeline using the effect's bind group layout
+				// Tonemap outputs to the swapchain, so use mSwapChainFormat (not mCurrentColorFormat which is HDR)
 				if (mToneMapPipeline == null && toneMap.BindGroupLayout != null)
 				{
-					let config = PipelineConfig.ForFullscreen("tonemap");
+					var config = PipelineConfig.ForFullscreen("tonemap");
+					config.ColorFormat = mSwapChainFormat;
 					if (mPipelineCache.GetOrCreate(config, toneMap.BindGroupLayout) case .Ok(let pipeline))
 						mToneMapPipeline = pipeline;
 				}
@@ -1830,7 +1848,8 @@ public class Renderer
 			return;
 
 		// Skybox pipeline: PositionOnly, depth read-only LessEqual, front-face culling
-		let config = PipelineConfig.ForSkybox("skybox");
+		var config = PipelineConfig.ForSkybox("skybox");
+		config.ColorFormat = mCurrentColorFormat;
 		if (mPipelineCache.GetOrCreate(config, mSkyboxBindGroupLayout, mFrameBindGroupLayout) case .Ok(let pipeline))
 			mSkyboxPipeline = pipeline;
 	}

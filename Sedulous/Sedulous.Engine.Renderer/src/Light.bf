@@ -78,9 +78,12 @@ public class Light : Drawable
 		set => mBrightness = Math.Max(value, 0.0f);
 	}
 
-	/// Effective color (color * brightness).
-	public Color EffectiveColor => Color(mColor.R * mBrightness, mColor.G * mBrightness,
-		mColor.B * mBrightness, mColor.A);
+	/// Effective color (color * brightness) as HDR float4.
+	public Vector4 EffectiveColor => .(
+		(float)mColor.R / 255.0f * mBrightness,
+		(float)mColor.G / 255.0f * mBrightness,
+		(float)mColor.B / 255.0f * mBrightness,
+		(float)mColor.A / 255.0f);
 
 	/// Range for point and spot lights.
 	public float Range
